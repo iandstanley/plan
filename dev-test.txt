@@ -1,0 +1,311 @@
+========================================================================
+DOCUMENT ID : TEST-MVS38J-TODO-001 (REV 2.0)
+TITLE       : MVS 3.8J MULTI-USER TO-DO MANAGER - VERIFICATION TEST SUITE
+SUBSYSTEM   : TODO MANAGER (MVS 3.8J TK5 - TSO, KICKS & NIGHTLY BATCH)
+AUTHOR      : IAN STANLEY
+DATE        : NOVEMBER 2026
+========================================================================
+
+1. TEST PREREQUISITES & ENVIRONMENT SETUP
+------------------------------------------------------------------------
+  - Mainframe Environment : Hercules running MVS 3.8j Turnkey 5 (TK5)
+                            with volume PUB000 online and KICKS.V1R5M0.*
+                            installed.
+  - Test User IDs         : Two TSO user IDs (standard TK5 defaults
+                            HERC01 and HERC02) to verify multi-user
+                            delegation, cross-user browsing, and
+                            concurrent locking.
+  - Clean Starting State  : Run from a fresh installation of
+                            dist/TODOINST.jcl (or after running
+                            TODO.JCL(UNINSTAL) followed by TODOINST.jcl).
+
+2. SUITE 1: INSTALLATION & BUILD VERIFICATION
+------------------------------------------------------------------------
+ [ ] TC-1.1  COMBINED CARD-READER / IND$FILE INSTALLATION (TODOINST.jcl)
+     Action   : Submit dist/TODOINST.jcl via Hercules card reader
+                (devinit 00c .../TODOINST.jcl ascii eof) or IND$FILE +
+                SUBMIT.
+     Expected : 1. Job INSTCORE completes in RFE Option 3.8 with RC = 0000
+                   (or RC = 0004 warnings only; zero RC >= 0008 or abends).
+                2. In RFE Option 3.4 (DSNAME Level = TODO), all 14 datasets
+                   exist on PUB000:
+                     - TODO.MASTER.CLUSTER, TODO.MASTER.AIX1,
+                       TODO.MASTER.PATH1, TODO.CONTROL.CLUSTER
+                     - TODO.ARCHIVE.GDG (base GDG cataloged)
+                     - TODO.COPYLIB (6 members), TODO.COBOL (4 members),
+                       TODO.ASM (1 member), TODO.KICKS.BMS (1 member),
+                       TODO.KICKS.COBOL (5 members), TODO.CLIST (2 members),
+                       TODO.PARMLIB (1 member), TODO.JCL (7 members
+                       including INSTDOC and UNINDOC)
+                     - TODO.LOADLIB (TODOLOCK, TODOVAL, TODOCMD, TODOBAT1,
+                       TODOBAT2)
+                     - TODO.KICKS.LOADLIB (TODOK01, TODOK02, TODOM00,
+                       KIKPPT2$, KIKPCT2$, KIKFCT2$)
+                3. In RFE Option 3.4, SYS2.CMDPROC contains members TODO
+                   and TODOKICK.
+
+ [ ] TC-1.2  STANDALONE RECOMPILE JOB (TODO.JCL(COMPALL))
+     Action   : Submit SUBMIT 'TODO.JCL(COMPALL)' from TSO READY.
+     Expected : All steps (ASMLOCK, CMPVAL, CMPCMD, CMPBAT1, CMPBAT2,
+                MAPM00, KCKK01, KCKK02, ASMPPT, ASMPCT, ASMFCT) complete
+                with RC = 0000 or RC = 0004.
+
+3. SUITE 2: TSO LINE-MODE CLI (%TODO) FUNCTIONAL TESTS
+------------------------------------------------------------------------
+Log on as HERC01 at the TSO READY prompt for TC-2.1 through TC-2.8.
+
+ [ ] TC-2.1  EMPTY QUEUE BEHAVIOR (LIST)
+     Command  : %TODO LIST
+     Expected : Displays clean header and "NO TASKS FOUND" message with
+                return code 04 (and zero VSAM errors).
+
+ [ ] TC-2.2  TASK CREATION & AUTO-PROVISIONING (ADD)
+     Commands :
+       %TODO ADD TITLE('APPLY RSU TAPE TO TEST LPAR') DUE(20261215) PRI(1) CAT(SYSPROG)
+       %TODO ADD TITLE('UPDATE TK5 BACKUP JCL') DUE(20261210) PRI(2) CAT(OPS) NOTE('CHECK PUB000 SPACE')
+       %TODO ADD TITLE('REVIEW OLD SMF DUMPS') PRI(4) CAT(AUDIT)
+     Expected : 1. First ADD auto-provisions HERC01 in TODO.CONTROL.CLUSTER.
+                2. Tasks receive sequential IDs 00000001, 00000002, and
+                   00000003.
+                3. Task 3 defaults to DUE(00000000) (no due date).
+
+ [ ] TC-2.3  ALTERNATE INDEX (AIX1) SORT ORDER (LIST)
+     Command  : %TODO LIST
+     Expected : Tasks are displayed sorted by Due Date ascending, then
+                Priority ascending (not insertion order):
+                  1. Task 00000002 (DUE=20261210, PRI=2)
+                  2. Task 00000001 (DUE=20261215, PRI=1)
+                  3. Task 00000003 (DUE=00000000 / NONE, PRI=4)
+
+ [ ] TC-2.4  SINGLE TASK DETAIL INSPECTION (VIEW)
+     Command  : %TODO VIEW ARG1(2)
+     Expected : Displays full details for 00000002 (unpadded ID lookup
+                works), including Title, Category (OPS), Status (O),
+                Priority (2), Due Date (20261210), Created Date
+                (YYYYMMDD), Created By (HERC01), Done Date (00000000),
+                and Note Line 1 (CHECK PUB000 SPACE).
+
+ [ ] TC-2.5  MULTI-LINE NOTE UPDATES (NOTE)
+     Commands :
+       %TODO NOTE ARG1(2) NOTE('VERIFY 3350 UNIT ADDRESS') LINE(2)
+       %TODO NOTE ARG1(2) NOTE('NOTIFY OPERATOR BEFORE IPL') LINE(3)
+       %TODO VIEW ARG1(2)
+     Expected : VIEW shows all three 60-character note lines preserved
+                intact without overwriting Line 1.
+
+ [ ] TC-2.6  LIFECYCLE STATE TRANSITIONS (START, WAIT, DONE, CANCEL)
+     Commands :
+       %TODO START ARG1(1)
+       %TODO WAIT ARG1(2)
+       %TODO LIST WAIT
+       %TODO DONE ARG1(1)
+       %TODO CANCEL ARG1(3)
+       %TODO LIST
+       %TODO LIST ALL
+     Expected : 1. START sets status to I; WAIT sets status to W.
+                2. %TODO LIST WAIT displays only Task 00000002.
+                3. DONE sets Task 1 status to C and stamps today's
+                   YYYYMMDD into TODO-DONE-DATE.
+                4. CANCEL sets Task 3 status to X and stamps today's
+                   YYYYMMDD into TODO-DONE-DATE.
+                5. %TODO LIST (active filter) shows only Task 00000002;
+                   %TODO LIST ALL shows all 3 tasks (1, 2, 3).
+
+ [ ] TC-2.7  CROSS-USER TASK CREATION & DELEGATION (ADD ... TO & ASSIGN)
+     Commands :
+       %TODO ADD TITLE('CHECK JES2 SPOOL UTILIZATION') PRI(2) CAT(OPS) TO(HERC02)
+       %TODO ASSIGN ARG1(2) TO(HERC02)
+       %TODO LIST
+       %TODO LIST USER(HERC02)
+     Expected : 1. HERC02 is auto-provisioned in TODO.CONTROL.CLUSTER.
+                2. ADD ... TO(HERC02) creates HERC02 Task 00000001 with
+                   CREATED-BY = HERC01.
+                3. ASSIGN ARG1(2) TO(HERC02) creates HERC02 Task 00000002
+                   and deletes Task 00000002 from HERC01's queue.
+                4. %TODO LIST for HERC01 shows zero active tasks;
+                   %TODO LIST USER(HERC02) shows both delegated tasks.
+
+ [ ] TC-2.8  USER PRINT SUBSCRIPTION & DEFAULTS (PRINT)
+     Commands :
+       %TODO PRINT ARG1(ON) NAME('IAN STANLEY') PRI(2)
+       %TODO ADD TITLE('TEST DEFAULT PRIORITY')
+       %TODO VIEW ARG1(4)
+     Expected : 1. HERC01's control record updates DAILY-PRINT-SW = 'Y',
+                   USER-NAME = 'IAN STANLEY', and DEFAULT-PRI = 2.
+                2. Subsequent ADD without PRI() automatically assigns
+                   Priority 2.
+
+ [ ] TC-2.9  BATCH CLI EXECUTION (IKJEFT01)
+     Action   : Submit a batch job executing IKJEFT01 with SYSTSIN
+                containing:
+                  %TODO ADD TITLE('BATCH INJECTED TASK') PRI(1) CAT(BATCH)
+     Expected : Step ends with RC = 0000 and the task appears in
+                %TODO LIST under the submitting job's user ID.
+
+4. SUITE 3: INPUT VALIDATION & NEGATIVE TESTING (TODOVAL)
+------------------------------------------------------------------------
+Verify that invalid inputs are caught cleanly without VSAM corruption
+or abends (RC = 08):
+
+ [ ] TC-3.1  BLANK TITLE REJECTION
+     Command  : %TODO ADD TITLE('   ')
+     Expected : Rejects blank title with RC = 08.
+
+ [ ] TC-3.2  INVALID MONTH REJECTION
+     Command  : %TODO ADD TITLE('BAD MONTH') DUE(20261301)
+     Expected : Rejects invalid month (13) with RC = 08.
+
+ [ ] TC-3.3  NON-LEAP YEAR FEB 29 REJECTION
+     Command  : %TODO ADD TITLE('NON-LEAP FEB 29') DUE(20260229)
+     Expected : Rejects 20260229 (2026 is not a leap year) with RC = 08.
+
+ [ ] TC-3.4  LEAP YEAR FEB 29 ACCEPTANCE
+     Command  : %TODO ADD TITLE('LEAP YEAR FEB 29') DUE(20280229)
+     Expected : Accepts 20280229 (2028 is a valid leap year) with RC = 00.
+
+ [ ] TC-3.5  OUT-OF-RANGE PRIORITY REJECTION
+     Command  : %TODO ADD TITLE('BAD PRI') PRI(9)
+     Expected : Rejects priority outside 1-5 with RC = 08.
+
+ [ ] TC-3.6  NON-EXISTENT TASK ID LOOKUP
+     Command  : %TODO VIEW ARG1(99999)
+     Expected : Clean "TASK NOT FOUND" error with RC = 08.
+
+ [ ] TC-3.7  NON-NUMERIC TASK ID REJECTION
+     Command  : %TODO DONE ARG1(ABC)
+     Expected : Rejects non-numeric Task ID with RC = 08.
+
+ [ ] TC-3.8  UNKNOWN COMMAND VERB REJECTION
+     Command  : %TODO BOGUS
+     Expected : Rejects unknown command verb with RC = 08.
+
+5. SUITE 4: KICKS 3270 ONLINE INTERFACE (%TODOKICK) TESTS
+------------------------------------------------------------------------
+Log on as HERC02 at TSO READY and launch KICKS:
+  %TODOKICK
+Press CLEAR on the KICKS banner, type TODO, and press ENTER.
+
+ [ ] TC-4.1  BROWSE SCREEN (TODOM1), FILTERING & PAGING
+     Actions  : 1. Verify TODOM1 opens showing VIEW OWNER: HERC02,
+                   FILTER: O, and active tasks sorted by Due Date +
+                   Priority.
+                2. Overtype FILTER with A and press ENTER -> displays
+                   all tasks (Active + Completed + Cancelled). Overtype
+                   FILTER with W -> displays only Waiting tasks. Restore
+                   FILTER to O.
+                3. Overtype VIEW OWNER with HERC01 and press ENTER ->
+                   displays HERC01's tasks. Restore VIEW OWNER to HERC02.
+                4. Add 12+ tasks for HERC02, verify Rows 1-10 display on
+                   Page 1, press PF8 to advance to Page 2 (Tasks 11-12),
+                   and press PF5 to refresh back to Page 1.
+
+ [ ] TC-4.2  INLINE ROW ACTIONS (TODOM1)
+     Actions  : 1. Enter 'W' in the action column next to Task 1 and
+                   press ENTER -> status immediately changes to W.
+                2. Enter 'C' next to Task 1 and press ENTER -> task is
+                   marked C (DONE-DATE stamped) and disappears from the
+                   FILTER: O active view.
+                3. Enter 'S' next to an active task and press ENTER ->
+                   transfers via XCTL to TODOM2 (MODE: EDIT TASK).
+
+ [ ] TC-4.3  ADD, EDIT, SYMBOLIC CURSOR & DELEGATION (TODOM2)
+     Actions  : 1. From TODOM1, press PF4. Leave Title blank and press
+                   ENTER -> verify error message on Row 22 and cursor
+                   positioned directly on the Title field.
+                2. Enter Title, Category, Priority 1, Due Date 20261220,
+                   and Notes 1-3, then press ENTER -> returns to TODOM1
+                   with new task listed.
+                3. Select a task with 'S' on TODOM1. On TODOM2, overtype
+                   OWNER ID from HERC02 to HERC01 and press ENTER ->
+                   task is re-numbered under HERC01 and removed from
+                   HERC02.
+
+ [ ] TC-4.4  USER SETTINGS SCREEN (TODOM3) & CLEAN EXIT (PF3)
+     Actions  : 1. From TODOM1, press PF9 to open TODOM3.
+                2. Update Banner Name to HERC02 OPERATOR, set Daily
+                   Print to Y, set Default Priority to 2, and press
+                   ENTER -> confirms settings saved.
+                3. Press PF3 on TODOM1 -> exits TODO transaction cleanly
+                   with screen cleared (zero KICKS ASRA/AEI* abends).
+
+6. SUITE 5: MULTI-USER CONCURRENCY & LOCKING (TODOLOCK)
+------------------------------------------------------------------------
+ [ ] TC-5.1  SIMULTANEOUS TWO-TERMINAL UPDATES
+     Actions  : 1. Open two 3270 terminal sessions simultaneously:
+                   Session A logged on as HERC01, Session B logged on
+                   as HERC02 (both inside KICKS TODO or running %TODO).
+                2. Have both users rapidly add tasks and assign tasks to
+                   HERC01 at the same time.
+     Expected : Zero duplicate Task IDs are generated in
+                TODO.MASTER.CLUSTER, and zero VSAM status 22 or lock
+                conflicts occur.
+
+ [ ] TC-5.2  OPTIMISTIC RECORD-VERSION CONFLICT DETECTION (TODOM2)
+     Actions  : 1. Open the same HERC01 task on TODOM2 (MODE: EDIT TASK)
+                   in Session A.
+                2. Before Session A presses ENTER, complete or edit that
+                   same task in Session B (%TODO DONE ARG1(n)).
+                3. Now press ENTER to save in Session A.
+     Expected : TODOK02 detects that TODO-REC-VERSION changed in VSAM
+                since CA-SAVED-REC-VERSION was loaded, aborts the
+                overwrite, and displays a concurrency warning prompting
+                the user to refresh.
+
+7. SUITE 6: NIGHTLY BATCH CYCLE (TODO.JCL(TODONITE))
+------------------------------------------------------------------------
+ [ ] TC-6.1  ARCHIVE, VSAM REORG & DEFAULT ACTION SHEET PRINT
+     Actions  : 1. Ensure at least two tasks have status C or X, and both
+                   HERC01 (DAILY-PRINT-SW = 'Y') and HERC02
+                   (DAILY-PRINT-SW = 'Y') are subscribed.
+                2. Submit SUBMIT 'TODO.JCL(TODONITE)'.
+     Expected : 1. All 5 steps (CLEANUP, ARCHIVE, REORG, DELTEMP,
+                   PRTSHEET) complete with RC = 0000.
+                2. Closed (C/X) tasks are written to
+                   TODO.ARCHIVE.GDG.G0001V00 and purged from
+                   TODO.MASTER.CLUSTER.
+                3. Active tasks remain intact in TODO.MASTER.CLUSTER
+                   with TODO.MASTER.AIX1 rebuilt cleanly.
+                4. On virtual printer 00E (SYSOUT=A), two Daily Action
+                   Sheets print separated by ASA '1' top-of-form page
+                   ejects, each displaying the user's 24-character Banner
+                   Name and tasks sorted by Due Date + Priority.
+
+ [ ] TC-6.2  "NO OPEN TASKS TODAY" CONFIRMATION SHEET
+     Actions  : Complete/cancel all active tasks for HERC01 (with
+                DAILY-PRINT-SW = 'Y'), run TODONITE to purge them, and
+                run TODONITE a second time.
+     Expected : TODOBAT1 returns RC = 0004 (0 records archived;
+                COND=(4,LT) allows subsequent steps to proceed), and
+                TODOBAT2 prints a confirmation Action Sheet for HERC01
+                reading: *** NO OPEN TASKS TODAY ***
+
+ [ ] TC-6.3  SUBSCRIPTION MODEL C OVERRIDE (TODO.PARMLIB(PRTLIST))
+     Actions  : 1. Edit TODO.PARMLIB(PRTLIST) and add a single line
+                   containing HERC01 starting in Column 1.
+                2. Submit SUBMIT 'TODO.JCL(TODONITE)'.
+     Expected : TODOBAT2 prints an Action Sheet ONLY for HERC01, ignoring
+                HERC02 even though HERC02 has DAILY-PRINT-SW = 'Y'.
+                (Remove HERC01 from PRTLIST afterward to restore normal
+                opt-in mode.)
+
+8. SUITE 7: UPGRADE RECOVERY & CLEAN UNINSTALL
+------------------------------------------------------------------------
+ [ ] TC-7.1  TK5 UPGRADE HOOK RECOVERY (TODO.JCL(INSTHOOK))
+     Actions  : 1. Delete TODO and TODOKICK from SYS2.CMDPROC (simulating
+                   a TK5 system pack replacement).
+                2. Submit SUBMIT 'TODO.JCL(INSTHOOK)'.
+     Expected : INSTHOOK completes with RC = 0000, restoring both CLIST
+                hooks in SYS2.CMDPROC without affecting existing task
+                data on PUB000.
+
+ [ ] TC-7.2  COMPLETE APPLICATION TEARDOWN (TODO.JCL(UNINSTAL))
+     Actions  : 1. Ensure all KICKS and %TODO sessions are closed.
+                2. Submit SUBMIT 'TODO.JCL(UNINSTAL)'.
+     Expected : 1. Job UNINSTAL completes in RFE Option 3.8 with
+                   RC = 0000 across steps CHKUSE, DELVSAM, DELPDS,
+                   DELALIAS, and CHKLIST.
+                2. In RFE Option 3.4, DSNAME level 'TODO' returns zero
+                   datasets on PUB000 or in the catalog.
+                3. Members TODO and TODOKICK are removed from
+                   SYS2.CMDPROC.
+========================================================================
