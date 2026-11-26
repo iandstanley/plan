@@ -174,6 +174,39 @@
                10  CA-TOP-TASK-ID      PIC 9(08).
            05  CA-SAVED-REC-VERSION    PIC S9(04) COMP SYNC.
            05  CA-FILLER               PIC X(18).
+./ ADD NAME=TODOCREC
+*================================================================*
+      * COPYBOOK: TODOCREC - TSO CLI COMMAND RECORD LAYOUT (200 BYTES) *
+      * SUBSYSTEM: TODO MANAGER (MVS 3.8J TK5 / IKFCBL00)              *
+      *================================================================*
+           05  CMD-USER-ID             PIC X(08).
+           05  CMD-VERB                PIC X(08).
+               88  CMD-IS-LIST             VALUE 'LIST    ' '        '.
+               88  CMD-IS-ADD              VALUE 'ADD     '.
+               88  CMD-IS-VIEW             VALUE 'VIEW    '.
+               88  CMD-IS-START            VALUE 'START   '.
+               88  CMD-IS-WAIT             VALUE 'WAIT    '.
+               88  CMD-IS-DONE             VALUE 'DONE    '.
+               88  CMD-IS-CANCEL           VALUE 'CANCEL  '.
+               88  CMD-IS-ASSIGN           VALUE 'ASSIGN  '.
+               88  CMD-IS-NOTE             VALUE 'NOTE    '.
+               88  CMD-IS-PRINT            VALUE 'PRINT   '.
+               88  VALID-CMD-VERB          VALUE 'LIST    ' '        '
+                                                 'ADD     ' 'VIEW    '
+                                                 'START   ' 'WAIT    '
+                                                 'DONE    ' 'CANCEL  '
+                                                 'ASSIGN  ' 'NOTE    '
+                                                 'PRINT   '.
+           05  CMD-ARG1                PIC X(16).
+           05  CMD-ARG2                PIC X(16).
+           05  CMD-DUE-DATE            PIC X(08).
+           05  CMD-PRIORITY            PIC X(01).
+           05  CMD-LINE-NUM            PIC X(01).
+           05  CMD-CATEGORY            PIC X(10).
+           05  CMD-TARGET-USER         PIC X(08).
+           05  CMD-TEXT                PIC X(60).
+           05  CMD-NOTE                PIC X(60).
+           05  CMD-FILLER              PIC X(04).
 ./ ADD NAME=TODOCTRL
 *================================================================*
       * COPYBOOK: TODOCTRL - USER CONTROL & PREFERENCES (64 BYTES)     *
@@ -210,37 +243,48 @@
 		   
 ./ ADD NAME=TODOREC
 *================================================================*
-      * COPYBOOK: TODOCREC - TSO CLI COMMAND RECORD LAYOUT (200 BYTES) *
+      * COPYBOOK: TODOREC  - MASTER TASK VSAM KSDS RECORD (332 BYTES)  *
       * SUBSYSTEM: TODO MANAGER (MVS 3.8J TK5 / IKFCBL00)              *
       *================================================================*
-           05  CMD-USER-ID             PIC X(08).
-           05  CMD-VERB                PIC X(08).
-               88  CMD-IS-LIST             VALUE 'LIST    ' '        '.
-               88  CMD-IS-ADD              VALUE 'ADD     '.
-               88  CMD-IS-VIEW             VALUE 'VIEW    '.
-               88  CMD-IS-START            VALUE 'START   '.
-               88  CMD-IS-WAIT             VALUE 'WAIT    '.
-               88  CMD-IS-DONE             VALUE 'DONE    '.
-               88  CMD-IS-CANCEL           VALUE 'CANCEL  '.
-               88  CMD-IS-ASSIGN           VALUE 'ASSIGN  '.
-               88  CMD-IS-NOTE             VALUE 'NOTE    '.
-               88  CMD-IS-PRINT            VALUE 'PRINT   '.
-               88  VALID-CMD-VERB          VALUE 'LIST    ' '        '
-                                                 'ADD     ' 'VIEW    '
-                                                 'START   ' 'WAIT    '
-                                                 'DONE    ' 'CANCEL  '
-                                                 'ASSIGN  ' 'NOTE    '
-                                                 'PRINT   '.
-           05  CMD-ARG1                PIC X(16).
-           05  CMD-ARG2                PIC X(16).
-           05  CMD-DUE-DATE            PIC X(08).
-           05  CMD-PRIORITY            PIC X(01).
-           05  CMD-LINE-NUM            PIC X(01).
-           05  CMD-CATEGORY            PIC X(10).
-           05  CMD-TARGET-USER         PIC X(08).
-           05  CMD-TEXT                PIC X(60).
-           05  CMD-NOTE                PIC X(60).
-           05  CMD-FILLER              PIC X(04).
+           05  TODO-PRIMARY-KEY.
+               10  TODO-OWNER-ID           PIC X(08).
+               10  TODO-TASK-ID            PIC 9(08).
+           05  TODO-ALT-KEY.
+               10  TODO-ALT-OWNER-ID       PIC X(08).
+               10  TODO-ALT-DUE-DATE       PIC 9(08).
+               10  TODO-ALT-PRIORITY       PIC 9(01).
+           05  TODO-DATA.
+               10  TODO-TITLE              PIC X(60).
+               10  TODO-CATEGORY           PIC X(10).
+               10  TODO-STATUS             PIC X(01).
+                   88  TODO-STAT-OPEN          VALUE 'O'.
+                   88  TODO-STAT-INPROG        VALUE 'I'.
+                   88  TODO-STAT-WAITING       VALUE 'W'.
+                   88  TODO-STAT-DONE          VALUE 'C'.
+                   88  TODO-STAT-CANCEL        VALUE 'X'.
+                   88  TODO-IS-ACTIVE          VALUE 'O' 'I' 'W'.
+                   88  TODO-IS-CLOSED          VALUE 'C' 'X'.
+                   88  VALID-TODO-STATUS       VALUE 'O' 'I' 'W' 'C' 'X'.
+               10  TODO-PRIORITY           PIC 9(01).
+                   88  TODO-PRI-URGENT         VALUE 1.
+                   88  TODO-PRI-HIGH           VALUE 2.
+                   88  TODO-PRI-NORMAL         VALUE 3.
+                   88  TODO-PRI-LOW            VALUE 4.
+                   88  TODO-PRI-DEFER          VALUE 5.
+                   88  VALID-TODO-PRIORITY     VALUE 1 THRU 5.
+               10  TODO-DUE-DATE           PIC 9(08).
+                   88  TODO-NO-DUE-DATE        VALUE ZERO.
+               10  TODO-CREATED-DATE       PIC 9(08).
+               10  TODO-CREATED-BY         PIC X(08).
+               10  TODO-DONE-DATE          PIC 9(08).
+                   88  TODO-NO-DONE-DATE       VALUE ZERO.
+               10  TODO-NOTES-BLOCK.
+                   15  TODO-NOTE-LINE-1    PIC X(60).
+                   15  TODO-NOTE-LINE-2    PIC X(60).
+                   15  TODO-NOTE-LINE-3    PIC X(60).
+           05  TODO-CONTROL.
+               10  TODO-REC-VERSION        PIC S9(04) COMP SYNC.
+               10  TODO-FILLER             PIC X(13).
 ./ ADD NAME=TODOVLNK
 *================================================================*
       * COPYBOOK: TODOVLNK - LINKAGE CONTRACT FOR TODOVAL (120 BYTES)  *
@@ -3911,6 +3955,19 @@ EXIT CODE(0)
 //SYSPRINT DD  SYSOUT=*
 //SYSUT2   DD  DSN=TODO.PARMLIB,DISP=SHR
 //SYSIN    DD  DATA,DLM=@@
+./ ADD NAME=PRTLIST
+*======================================================================*
+* MEMBER: TODO.PARMLIB(PRTLIST) - DAILY ACTION SHEET USER OVERRIDE LIST  *
+*                                                                      *
+* SUBSCRIPTION MODEL C RULES:                                          *
+*   1. LINES STARTING WITH '*' IN COLUMN 1 OR BLANK LINES ARE IGNORED. *
+*   2. IF THIS MEMBER CONTAINS NO ACTIVE USERID LINES, TODOBAT2 SCANS  *
+*      TODO.CONTROL.CLUSTER AND PRINTS FOR ALL USERS WITH PRINT='Y'.   *
+*   3. IF ONE OR MORE USERIDS ARE LISTED BELOW (COLS 1-8), TODOBAT2    *
+*      PRINTS ACTION SHEETS EXCLUSIVELY FOR THOSE LISTED USERS.        *
+*======================================================================*
+*HERC01
+*HERC02
 ./ ENDUP
 @@
 //*-------------------------------------------------------------------*
