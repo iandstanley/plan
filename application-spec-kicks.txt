@@ -1,0 +1,348 @@
+========================================================================
+DOCUMENT ID : SPEC-MVS38J-KICKS-001 (REV 2.0 - FULL SPECIFICATION)
+TITLE       : MVS 3.8J KICKS 3270 MULTI-USER TO-DO MANAGER SPECIFICATION
+SUBSYSTEM   : TODO MANAGER (MVS 3.8J TK5 - KICKS 3270 OLTP & BATCH)
+ENVIRONMENT : IBM MVS 3.8J (TURNKEY 5 / TK5) + HERCULES S/370
+              KICKS FOR TSO V1R5M0 (CICS COMMAND-LEVEL COMPATIBLE)
+              OS/VS COBOL (IKFCBL00) / SYSTEM/370 ASSEMBLER (IFOX00)
+              BMS 3270 MAPSETS / IDCAMS VSAM / TSO CLIST
+AUTHOR      : IAN STANLEY
+DATE        : NOVEMBER 2026
+========================================================================
+
+1. EXECUTIVE SUMMARY & ARCHITECTURAL OVERVIEW
+------------------------------------------------------------------------
+This document defines the complete functional, environmental, screen,
+and data architecture for the KICKS 3270 Online Edition of the Multi-User
+To-Do Manager on IBM MVS 3.8j (Turnkey 5 / TK5).
+
+Built on KICKS for TSO (V1R5M0)—an open-source CICS command-level
+compatible transaction processor running natively inside TSO address
+spaces on MVS 3.8j—this edition provides a responsive, menu-driven,
+full-screen 3270 terminal experience (TRANSID 'TODO') alongside nightly
+batch archival and Action Sheet printing.
+
+1.1 CORE DESIGN PILLARS
+    1. Strictly Pseudo-Conversational 3270 Architecture:
+       Every screen interaction terminates the active KICKS task via
+       EXEC CICS RETURN TRANSID('TODO') COMMAREA(WS-COMMAREA), releasing
+       virtual storage and VSAM buffers while the user thinks or types,
+       and preserving session context inside a 64-byte DFHCOMMAREA.
+    2. True Multi-User Concurrency Across Isolated KICKS Address Spaces:
+       Unlike mainframe CICS regions where multiple terminals share one
+       address space, KICKS on TK5 executes inside each user's own TSO
+       address space. Therefore, KICKS internal ENQ only serializes
+       within a single user's session. To guarantee cross-user integrity
+       when multiple users access shared VSAM files simultaneously,
+       TODOK01 and TODOK02 invoke Assembler subprogram TODOLOCK
+       (MVS SVC 56 ENQ / SVC 48 DEQ with QNAME='TODOFILE', SCOPE=SYSTEM)
+       paired with optimistic record-version checking (TODO-REC-VERSION).
+    3. Upgrade-Safe Custom KICKS Tables (Suffix '2$'):
+       Rather than modifying KICKS.V1R5M0.* system libraries (which are
+       overwritten during TK5 updates), all application programs, BMS
+       physical mapsets, and custom resource tables (KIKPPT2$, KIKPCT2$,
+       KIKFCT2$) reside in TODO.KICKS.LOADLIB on volume PUB000 and are
+       launched via %TODOKICK.
+    4. Strict COBOL-68 & KICKS Translator Compliance:
+       All COBOL source modules follow STD-MVS38J-COBOL-001 (Columns
+       1-72, period-terminated IF/ELSE/PERFORM structures, COMP-3 and
+       COMP SYNC numerics, inline RESP() checking, and EXEC CICS RETURN
+       termination).
+
+2. APPLICATION FEATURES & USER WORKFLOWS
+------------------------------------------------------------------------
+2.1 FULL-SCREEN 3270 TASK BROWSING & INLINE ACTIONS (MAP TODOM1)
+    - Displays up to 10 tasks per screen sorted in real time via VSAM
+      Alternate Index TODO.MASTER.AIX1 (Owner ID + Due Date + Priority).
+    - Header Controls:
+        * VIEW OWNER : Defaults to the signed-on TSO User ID (from
+                       EXEC CICS ASSIGN USERID), but can be overtyped
+                       with any TSO User ID to inspect another user's
+                       task queue.
+        * FILTER     : Single-character view filter:
+                         'O' = Active tasks only (Open, In-Progress,
+                               Waiting) — Default
+                         'W' = Waiting-On tasks only ('W')
+                         'A' = All tasks including Completed ('C') and
+                               Cancelled ('X').
+    - Inline Row Action Codes (Column 3 next to each row):
+        * 'S' (Select)   : Transfers via EXEC CICS XCTL to TODOK02
+                           (Map TODOM2) in Edit/Delegate mode.
+        * 'C' (Complete) : Marks task 'C', stamps TODO-DONE-DATE, and
+                           rewrites immediately under ENQ.
+        * 'W' (Wait)     : Marks task 'W' (Waiting On) under ENQ.
+        * 'X' (Cancel)   : Marks task 'X', stamps TODO-DONE-DATE, and
+                           rewrites immediately under ENQ.
+    - Function Key Navigation:
+        * ENTER : Applies View Owner / Filter changes and executes any
+                  entered row action code.
+        * PF3   : Cleanly exits the TODO application and clears screen.
+        * PF4   : Transfers via XCTL to TODOK02 (Map TODOM2) in Add mode.
+        * PF5   : Refreshes current task list from VSAM.
+        * PF8   : Advances to next page of tasks (when >10 items exist).
+        * PF9   : Opens User Settings screen (Map TODOM3).
+
+2.2 FULL-SCREEN TASK CREATION, EDITING & DELEGATION (MAP TODOM2)
+    - Driven by program TODOK02 via EXEC CICS XCTL from TODOK01.
+    - Supports creating new tasks ('MODE: ADD TASK') and modifying
+      existing tasks ('MODE: EDIT TASK') including:
+        * 60-character Title
+        * 10-character Category
+        * Status ('O', 'I', 'W', 'C', 'X')
+        * Priority (1=Urgent through 5=Deferred)
+        * Due Date (YYYYMMDD Gregorian or 00000000 for none)
+        * Three 60-character Note Lines (180 bytes total)
+        * Read-only audit metadata (Created By, Created On, Task ID).
+    - Optimistic Concurrency Control:
+        * Captures TODO-REC-VERSION into DFHCOMMAREA when loading a
+          task for edit. Before rewriting, TODOK02 re-reads under ENQ
+          and verifies the version matches—preventing silent lost
+          updates if another session modified the record concurrently.
+    - Live Cross-User Task Delegation:
+        * Overtyping OWNER ID on TODOM2 with a different TSO User ID
+          triggers atomic delegation: TODOK02 auto-provisions the
+          target user's TODOCTRL record if needed, allocates the target
+          user's next sequence Task ID under ENQ, writes the re-keyed
+          record to TODOMAST, and deletes the original record.
+
+2.3 USER PREFERENCES & NIGHTLY PRINT SUBSCRIPTIONS (MAP TODOM3)
+    - First-time KICKS users are automatically provisioned in
+      TODO.CONTROL.CLUSTER on initial entry to TRANSID 'TODO'.
+    - Map TODOM3 allows users to view their last assigned Task ID and
+      update:
+        * Banner Display Name (24 characters printed on Action Sheets)
+        * Daily Action Sheet subscription switch ('Y' or 'N')
+        * Personal Default Priority (1-5).
+
+2.4 SHARED DATA LAYER & NIGHTLY BATCH INTEGRATION
+    - Shares the exact same VSAM clusters (TODO.MASTER.CLUSTER,
+      TODO.MASTER.PATH1, TODO.CONTROL.CLUSTER) and validation/locking
+      subprograms (TODOVAL, TODOLOCK) with the TSO CLI and nightly
+      batch suite (TODOBAT1, TODOBAT2, TODONITE).
+
+3. MVS 3.8J & KICKS RUNTIME ENVIRONMENT
+------------------------------------------------------------------------
+3.1 SYSTEM & TP MONITOR STACK
+    - Processor / Emulator   : IBM System/370 (Hercules S/370)
+    - Operating System       : MVS 3.8j Turnkey 5 (TK5)
+    - TP Monitor             : KICKS for TSO V1R5M0
+    - Terminal Geometry      : IBM 3270 Model 2 (24 rows x 80 columns)
+    - Pre-Translator         : KIKPPCOB (PROC KIKCB2CL)
+    - Map Generator          : KIKMAPS  (PROC KIKMAPS)
+    - COBOL Compiler         : OS/VS COBOL IKFCBL00
+    - Assembler              : IFOX00   (PROC ASMFCL)
+
+3.2 DASD & CATALOG LAYOUT (VOLUME PUB000)
+    All application datasets reside on 3350 volume PUB000 under Master
+    Catalog alias 'TODO' -> SYS1.UCAT.TSO:
+
+    DATASET NAME             ORG    RECFM  LRECL  BLKSIZE  ALLOCATION
+    -----------------------  -----  -----  -----  -------  -------------
+    TODO.MASTER.CLUSTER      VSAM   KSDS     332     4096  15,5 TRK
+    TODO.MASTER.AIX1         VSAM   AIX      200     4096   5,2 TRK
+    TODO.MASTER.PATH1        VSAM   PATH     332     4096  (Path entry)
+    TODO.CONTROL.CLUSTER     VSAM   KSDS      64     4096   2,1 TRK
+    TODO.ARCHIVE.GDG         GDG    FB       332     6308  LIMIT(30) SCR
+    TODO.COPYLIB             PDS    FB        80     6160   5,2,10 TRK
+    TODO.COBOL               PDS    FB        80     6160  10,5,15 TRK
+    TODO.ASM                 PDS    FB        80     6160   2,1,5  TRK
+    TODO.KICKS.BMS           PDS    FB        80     6160   2,1,5  TRK
+    TODO.KICKS.COBOL         PDS    FB        80     6160  10,5,15 TRK
+    TODO.CLIST               PDS    FB        80     6160   2,1,5  TRK
+    TODO.PARMLIB             PDS    FB        80     6160   2,1,5  TRK
+    TODO.JCL                 PDS    FB        80     6160   5,2,10 TRK
+    TODO.LOADLIB             PDS    U          0     6144  10,5,15 TRK
+    TODO.KICKS.LOADLIB       PDS    U          0     6144  10,5,15 TRK
+
+3.3 CUSTOM KICKS RESOURCE TABLES (SUFFIX '2$' IN TODO.KICKS.LOADLIB)
+    To remain completely immune to TK5 KICKS library upgrades, three
+    custom resource tables are assembled into TODO.KICKS.LOADLIB and
+    activated at runtime via %TODOKICK:
+
+    1. KIKPPT2$ (Processing Program Table):
+         KIKPPT TYPE=INITIAL,SUFFIX=2$
+         KIKPPT TYPE=ENTRY,PROGRAM=TODOK01,PGMLANG=CMDLVL
+         KIKPPT TYPE=ENTRY,PROGRAM=TODOK02,PGMLANG=CMDLVL
+         KIKPPT TYPE=ENTRY,MAPSET=TODOM00,USAGE=MAP
+         KIKPPT TYPE=FINAL
+
+    2. KIKPCT2$ (Program Control Table):
+         KIKPCT TYPE=INITIAL,SUFFIX=2$
+         KIKPCT TYPE=ENTRY,TRANSID=TODO,PROGRAM=TODOK01
+         KIKPCT TYPE=FINAL
+
+    3. KIKFCT2$ (File Control Table):
+         KIKFCT TYPE=INITIAL,SUFFIX=2$
+         KIKFCT TYPE=ENTRY,DATASET=TODOMAST,ACCMETH=VSAM,
+                SERVREQ=(ADD,BROWSE,DELETE,READ,UPDATE),STRNO=2
+         KIKFCT TYPE=ENTRY,DATASET=TODOPATH,ACCMETH=VSAM,
+                SERVREQ=(BROWSE,READ),STRNO=2
+         KIKFCT TYPE=ENTRY,DATASET=TODOCTRL,ACCMETH=VSAM,
+                SERVREQ=(ADD,BROWSE,READ,UPDATE),STRNO=2
+         KIKFCT TYPE=FINAL
+
+3.4 KICKS LAUNCH CLIST (TODO.CLIST(TODOKICK) -> SYS2.CMDPROC(TODOKICK))
+    Allocates the three VSAM DDNAMEs (TODOMAST, TODOPATH, TODOCTRL)
+    with DISP=SHR in the user's TSO address space and launches KICKS
+    with USRLOAD('TODO.KICKS.LOADLIB') and suffix '2$':
+
+      ALLOC FI(TODOMAST) DA('TODO.MASTER.CLUSTER') SHR
+      ALLOC FI(TODOPATH) DA('TODO.MASTER.PATH1')   SHR
+      ALLOC FI(TODOCTRL) DA('TODO.CONTROL.CLUSTER') SHR
+      EXEC 'KICKS.V1R5M0.CLIST(KICKS)' +
+           'PPT(2$) PCT(2$) FCT(2$) USRLOAD(''TODO.KICKS.LOADLIB'')'
+
+4. COMPLETE DATA FORMATS, COMMAREA & BMS SCREEN SCHEMAS
+------------------------------------------------------------------------
+4.1 MASTER TASK VSAM KSDS RECORD (TODO.COPYLIB(TODOREC) - 332 BYTES)
+    - Primary Key    : Bytes 1-16 (TODO-OWNER-ID + TODO-TASK-ID)
+    - Alternate Key  : Bytes 17-33 (TODO-ALT-OWNER-ID +
+                       TODO-ALT-DUE-DATE + TODO-ALT-PRIORITY),
+                       NONUNIQUEKEY, UPGRADE
+    - Sentinel Record: Key '0000000000000000'
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-008   8  CHAR         PIC X(08)              TODO-OWNER-ID
+    009-016   8  ZONED DEC    PIC 9(08)              TODO-TASK-ID
+    017-024   8  CHAR         PIC X(08)              TODO-ALT-OWNER-ID
+    025-032   8  ZONED DEC    PIC 9(08)              TODO-ALT-DUE-DATE
+    033-033   1  ZONED DEC    PIC 9(01)              TODO-ALT-PRIORITY
+    034-093  60  CHAR         PIC X(60)              TODO-TITLE
+    094-103  10  CHAR         PIC X(10)              TODO-CATEGORY
+    104-104   1  CHAR         PIC X(01)              TODO-STATUS
+    105-105   1  ZONED DEC    PIC 9(01)              TODO-PRIORITY
+    106-113   8  ZONED DEC    PIC 9(08)              TODO-DUE-DATE
+    114-121   8  ZONED DEC    PIC 9(08)              TODO-CREATED-DATE
+    122-129   8  CHAR         PIC X(08)              TODO-CREATED-BY
+    130-137   8  ZONED DEC    PIC 9(08)              TODO-DONE-DATE
+    138-197  60  CHAR         PIC X(60)              TODO-NOTE-LINE-1
+    198-257  60  CHAR         PIC X(60)              TODO-NOTE-LINE-2
+    258-317  60  CHAR         PIC X(60)              TODO-NOTE-LINE-3
+    318-319   2  BINARY       PIC S9(04) COMP SYNC   TODO-REC-VERSION
+    320-332  13  CHAR         PIC X(13)              TODO-FILLER
+
+4.2 USER CONTROL VSAM KSDS RECORD (TODO.COPYLIB(TODOCTRL) - 64 BYTES)
+    - Primary Key    : Bytes 1-8 (CTRL-USER-ID)
+    - Sentinel Record: Key '00000000'
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-008   8  CHAR         PIC X(08)              CTRL-USER-ID
+    009-016   8  ZONED DEC    PIC 9(08)              CTRL-LAST-TASK-ID
+    017-017   1  CHAR         PIC X(01)              CTRL-DAILY-PRINT-SW
+    018-018   1  ZONED DEC    PIC 9(01)              CTRL-DEFAULT-PRI
+    019-042  24  CHAR         PIC X(24)              CTRL-USER-NAME
+    043-044   2  BINARY       PIC S9(04) COMP SYNC   CTRL-ACTIVE-COUNT
+    045-052   8  ZONED DEC    PIC 9(08)              CTRL-LAST-LOGIN-DATE
+    053-064  12  CHAR         PIC X(12)              CTRL-FILLER
+
+4.3 KICKS DFHCOMMAREA CONTRACT (TODO.COPYLIB(TODOCOMM) - 64 BYTES)
+    Passed across pseudo-conversational RETURN and XCTL calls between
+    TODOK01 and TODOK02:
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-001   1  CHAR         PIC X(01)              CA-PROCESS-STAGE
+                                                       ('1'=Browse,
+                                                        '2'=Detail,
+                                                        '3'=Settings)
+    002-002   1  CHAR         PIC X(01)              CA-DETAIL-MODE
+                                                       ('A'=Add,
+                                                        'E'=Edit)
+    003-003   1  CHAR         PIC X(01)              CA-FILTER-MODE
+                                                       ('O'=Active,
+                                                        'W'=Wait,
+                                                        'A'=All)
+    004-011   8  CHAR         PIC X(08)              CA-VIEW-OWNER
+    012-019   8  ZONED DEC    PIC 9(08)              CA-SELECTED-TASK-ID
+    020-044  25  GROUP        CA-PAGE-TOP-KEY        (Owner 8 + Due 8 +
+                                                        Pri 1 + ID 8)
+    045-046   2  BINARY       PIC S9(04) COMP SYNC   CA-SAVED-REC-VERSION
+    047-064  18  CHAR         PIC X(18)              CA-FILLER
+
+4.4 VALIDATOR & LOCK LINKAGE CONTRACTS
+    - TODOVLNK (120 bytes): Identical field layout to TSO/Batch edition
+      (VLNK-FUNC-CODE, VLNK-STATUS, VLNK-PRIORITY, VLNK-DATE-FIELD,
+      VLNK-ZERO-DATE-OK, VLNK-OWNER-ID, VLNK-TITLE, VLNK-RC,
+      VLNK-ERR-MSG).
+    - TODOLLNK (20 bytes): Identical field layout to TSO/Batch edition
+      (LLNK-ACTION 'ENQ '/'DEQ ', LLNK-RNAME, LLNK-RC, LLNK-FILLER).
+
+4.5 BMS MAPSET LAYOUTS (TODO.KICKS.BMS(TODOM00) - 24X80)
+    All maps specify CTRL=(FREEKB,FRSET), TIOAPFX=YES, STORAGE=AUTO,
+    and 1-byte ASKIP stopper fields immediately following every UNPROT
+    input field to prevent 3270 field overflow:
+
+    - MAP TODOM1 (Task List / Browse):
+        * Row 1  : Title banner + M1USER (signed-on user, ASKIP)
+        * Row 2  : M1OWNR (8B UNPROT), M1FILT (1B UNPROT), action legend
+        * Rows 4-5: Column headers
+        * Rows 6-15: 10 task lines, each with:
+                     M1ACTnn (1B UNPROT), M1IDnn (8B), M1STnn (1B),
+                     M1PRnn (1B), M1DUnn (8B), M1CTnn (10B), M1TInn (36B)
+        * Row 22 : M1MSG (78B status/error message line, BRT)
+        * Row 24 : PF-key legend
+
+    - MAP TODOM2 (Add / Edit / Delegate Task Detail):
+        * Row 2  : M2MODE ('MODE: ADD TASK  ' or 'MODE: EDIT TASK ')
+        * Row 4  : M2ID (8B ASKIP), M2OWNR (8B UNPROT - editable to
+                   delegate)
+        * Row 6  : M2TITL (60B UNPROT, IC)
+        * Row 8  : M2CAT (10B UNPROT), M2STAT (1B UNPROT)
+        * Row 10 : M2PRI (1B UNPROT, NUM), M2DUE (8B UNPROT, NUM)
+        * Row 12 : M2CBY (8B ASKIP), M2CDT (8B ASKIP)
+        * Rows 14-16: M2NOT1, M2NOT2, M2NOT3 (each 60B UNPROT)
+        * Row 22 : M2MSG (78B status/validation message line)
+        * Row 24 : PF-key legend (ENTER=Save, PF3=Return, PF12=Cancel)
+
+    - MAP TODOM3 (User Preferences & Nightly Print Subscription):
+        * Row 5  : M3USER (8B ASKIP)
+        * Row 7  : M3NAME (24B UNPROT, IC)
+        * Row 9  : M3PRNT (1B UNPROT, 'Y' or 'N')
+        * Row 11 : M3PRI (1B UNPROT, NUM, '1'-'5')
+        * Row 13 : M3LAST (8B ASKIP - last assigned sequence Task ID)
+        * Row 22 : M3MSG (78B status/validation message line)
+        * Row 24 : PF-key legend (ENTER=Save, PF3=Return, PF12=Cancel)
+
+5. KICKS & BATCH PROGRAM MODULES
+------------------------------------------------------------------------
+5.1 ONLINE KICKS MODULES (TODO.KICKS.LOADLIB)
+    - TODOK01 : Primary transaction controller (TRANSID 'TODO'). Handles
+                first-time initialization (EIBCALEN=0), user control
+                auto-provisioning, AIX1 path browsing (STARTBR /
+                READNEXT / ENDBR on TODOPATH), inline row actions
+                (S/C/W/X), XCTL to TODOK02, and TODOM3 settings.
+    - TODOK02 : Task Detail controller. Handles Add and Edit initialization,
+                TODOVAL validation, symbolic cursor positioning
+                (MOVE -1 TO fieldL + DATAONLY), versioned REWRITE,
+                cross-user task delegation, and XCTL back to TODOK01.
+    - TODOVAL : Shared COBOL-68 field/date/priority/owner validator
+                (statically linked into TODOK02).
+    - TODOLOCK: Shared Assembler ENQ/DEQ lock manager (statically linked
+                into TODOK01 and TODOK02).
+
+5.2 NIGHTLY BATCH SUITE (TODO.LOADLIB & TODO.JCL(TODONITE))
+    - TODOBAT1: Sweeps Completed ('C') and Cancelled ('X') tasks into
+                TODO.ARCHIVE.GDG(+1) and purges them from
+                TODO.MASTER.CLUSTER under system-wide ENQ ('MASTER  ').
+    - TODOBAT2: Prints Daily Action Sheets (RECFM=FBA, LRECL=133, ASA
+                '1' page ejects) for subscribed users under Subscription
+                Model C (TODO.CONTROL.CLUSTER print flag or
+                TODO.PARMLIB(PRTLIST) override).
+
+6. KICKS PROGRAMMING & COMPILER STANDARDS (STD-MVS38J-COBOL-001)
+------------------------------------------------------------------------
+  - Pre-Translator     : KIKPPCOB (EXEC CICS ... END-EXEC)
+  - Compiler           : OS/VS COBOL (IKFCBL00), COBOL-68 standard
+  - Source Columns     : Strictly Columns 1-72 (Cols 73-80 blank)
+  - Scope Terminators  : Period-terminated IF/ELSE/PERFORM only (no
+                         COBOL-85 END-IF, END-READ, END-WRITE, END-PERFORM)
+  - Error Handling     : Inline RESP(WS-RESP-CODE) + DFHRESP(...) on
+                         every EXEC CICS command (no HANDLE CONDITION)
+  - Cursor Control     : Symbolic cursor positioning (MOVE -1 TO fieldL
+                         with CURSOR option on EXEC CICS SEND MAP)
+  - Program Termination: EXEC CICS RETURN TRANSID('TODO') COMMAREA(...)
+                         END-EXEC on every conversational turn;
+                         EXEC CICS RETURN END-EXEC on final exit
+========================================================================
