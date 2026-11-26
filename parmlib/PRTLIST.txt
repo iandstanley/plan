@@ -1,0 +1,12 @@
+*======================================================================*
+* MEMBER: TODO.PARMLIB(PRTLIST) - DAILY ACTION SHEET USER OVERRIDE LIST  *
+*                                                                      *
+* SUBSCRIPTION MODEL C RULES:                                          *
+*   1. LINES STARTING WITH '*' IN COLUMN 1 OR BLANK LINES ARE IGNORED. *
+*   2. IF THIS MEMBER CONTAINS NO ACTIVE USERID LINES, TODOBAT2 SCANS  *
+*      TODO.CONTROL.CLUSTER AND PRINTS FOR ALL USERS WITH PRINT='Y'.   *
+*   3. IF ONE OR MORE USERIDS ARE LISTED BELOW (COLS 1-8), TODOBAT2    *
+*      PRINTS ACTION SHEETS EXCLUSIVELY FOR THOSE LISTED USERS.        *
+*======================================================================*
+*HERC01
+*HERC02

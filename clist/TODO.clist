@@ -1,0 +1,66 @@
+PROC 1 SUBCMD ARG1() ARG2() TITLE() DUE(00000000) PRI(0) +
+       CAT() TO() USER() NOTE() LINE(1) NAME()
+/*===================================================================*/
+/* CLIST:     TODO - TSO LINE-MODE CLI DRIVER FOR TODO MANAGER       */
+/* SUBSYSTEM: TODO MANAGER (MVS 3.8J TK5)                            */
+/* USAGE:                                                            */
+/*   %TODO LIST [ALL|OPEN|WAIT] [USER(uid)]                          */
+/*   %TODO ADD TITLE('text') [DUE(yyyymmdd)] [PRI(1-5)] [CAT(c)]     */
+/*             [TO(uid)] [NOTE('text')]                              */
+/*   %TODO VIEW ARG1(id)                                             */
+/*   %TODO START|WAIT|DONE|CANCEL ARG1(id)                           */
+/*   %TODO ASSIGN ARG1(id) TO(uid)                                   */
+/*   %TODO NOTE ARG1(id) NOTE('text') [LINE(1|2|3)]                  */
+/*   %TODO PRINT ARG1(ON|OFF) [NAME('display name')] [PRI(1-5)]      */
+/*===================================================================*/
+CONTROL NOLIST NOCONLIST NOSYMLIST NOFLUSH
+
+SET &UID     = &SYSSTR(&SYSUID        ,1,8)
+SET &VERB    = &SYSSTR(&SUBCMD        ,1,8)
+SET &P1      = &SYSSTR(&ARG1                ,1,16)
+SET &P2      = &SYSSTR(&ARG2                ,1,16)
+SET &DDUE    = &SYSSTR(&DUE        ,1,8)
+SET &DPRI    = &SYSSTR(&PRI ,1,1)
+SET &DLINE   = &SYSSTR(&LINE ,1,1)
+SET &DCAT    = &SYSSTR(&CAT          ,1,10)
+SET &DTO     = &SYSSTR(&TO        ,1,8)
+
+IF &STR(&USER) NE &STR() THEN +
+  SET &DTO = &SYSSTR(&USER        ,1,8)
+
+SET &DTITLE  = &SYSSTR(&TITLE                                                            ,1,60)
+IF &STR(&NAME) NE &STR() THEN +
+  SET &DTITLE = &SYSSTR(&NAME                                                            ,1,60)
+
+SET &DNOTE   = &SYSSTR(&NOTE                                                            ,1,60)
+
+SET &CMDREC  = &STR(&UID&VERB&P1&P2&DDUE&DPRI&DLINE&DCAT&DTO&DTITLE&DNOTE    )
+SET &TEMPDSN = &STR('&SYSUID..TODO.CMDTEMP')
+
+/* CLEAN UP ANY STALE TEMP DATASET AND ALLOCATE FRESH 200-BYTE FILE */
+FREE FI(CMDSYSIN TODOMAST TODOPATH TODOCTRL)
+DELETE &TEMPDSN
+
+ALLOC FI(CMDSYSIN) DA(&TEMPDSN) NEW CATALOG +
+      SPACE(1,1) TRACKS UNIT(SYSDA) +
+      RECFM(F B) LRECL(200) BLKSIZE(200)
+
+OPENFILE CMDSYSIN OUTPUT
+SET &CMDSYSIN = &STR(&CMDREC)
+PUTFILE CMDSYSIN
+CLOSFILE CMDSYSIN
+
+/* ALLOCATE VSAM CLUSTERS SHR & ROUTE SYSOUT TO TSO TERMINAL */
+ALLOC FI(TODOMAST) DA('TODO.MASTER.CLUSTER') SHR
+ALLOC FI(TODOPATH) DA('TODO.MASTER.PATH1')   SHR
+ALLOC FI(TODOCTRL) DA('TODO.CONTROL.CLUSTER') SHR
+ALLOC FI(SYSOUT)   DA(*)
+
+CALL 'TODO.LOADLIB(TODOCMD)'
+SET &SAVERC = &LASTCC
+
+/* IMMEDIATELY RELEASE ALL DATASET LOCKS & DELETE TEMP WORK FILE */
+FREE FI(CMDSYSIN TODOMAST TODOPATH TODOCTRL)
+DELETE &TEMPDSN
+
+EXIT CODE(&SAVERC)

@@ -1,0 +1,92 @@
+========================================================================
+MEMBER:  TODO.JCL(INSTDOC)
+TITLE:   MVS 3.8J TO-DO MANAGER (TODO) - ON-HOST INSTALLATION GUIDE
+========================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------
+This guide documents the steps required on your MVS 3.8j (TK5) system
+after the initial card-reader / IEBUPDTE upload job (INSTCORE) has
+been submitted to load the TODO.* libraries onto volume PUB000.
+
+2. STEP 1 - VERIFY THE IEBUPDTE / UPLOAD JOB COMPLETED CLEANLY
+------------------------------------------------------------------------
+Before proceeding, inspect the held output of job INSTCORE in JES2:
+  1. Open RFE Option 3.8 (Outlist) or run TSO command: OUTPUT INSTCORE
+  2. Verify that all allocation, VSAM DEFINE/REPRO/BLDINDEX, and
+     IEBUPDTE load steps (LD*) completed with RC=0000 (or RC=0004 max).
+  3. Confirm in RFE Option 3.4 (DSNAME Level 'TODO') that all ten
+     libraries exist on PUB000 and are populated:
+       - TODO.COPYLIB        (TODOREC, TODOCTRL, TODOCREC, TODOCOMM,
+                              TODOVLNK, TODOLLNK)
+       - TODO.COBOL          (TODOVAL, TODOCMD, TODOBAT1, TODOBAT2)
+       - TODO.ASM            (TODOLOCK)
+       - TODO.KICKS.BMS      (TODOM00)
+       - TODO.KICKS.COBOL    (TODOK01, TODOK02, KIKPPT2$, KIKPCT2$,
+                              KIKFCT2$)
+       - TODO.CLIST          (TODO, TODOKICK)
+       - TODO.PARMLIB        (PRTLIST)
+       - TODO.JCL            (INSTCORE, INSTHOOK, COMPALL, TODONITE,
+                              UNINSTAL, INSTDOC, UNINDOC)
+       - TODO.LOADLIB        (Batch/TSO load library)
+       - TODO.KICKS.LOADLIB  (KICKS modules, maps, and 2$ tables)
+  4. If any step failed (RC >= 0008 or JCL error), resolve the cause
+     and resubmit before continuing.
+
+3. STEP 2 - BUILD OR VERIFY EXECUTABLES (COMPALL)
+------------------------------------------------------------------------
+  - If you ran the full combined release job (TODOINST.jcl), the
+    build steps (ASMLOCK through ASMFCT) ran automatically at the end
+    of that job. Verify in RFE Option 3.8 that those steps completed
+    with RC=0000 or RC=0004 (compiler warnings only).
+  - If you uploaded source members separately (or modified any source
+    member in TODO.COBOL, TODO.ASM, TODO.KICKS.COBOL, or TODO.KICKS.BMS),
+    submit the master build job:
+
+      SUBMIT 'TODO.JCL(COMPALL)'
+
+    Wait for completion and verify all steps return RC=0000 or RC=0004.
+
+4. STEP 3 - INSTALL OR VERIFY SYSTEM HOOKS (INSTHOOK)
+------------------------------------------------------------------------
+To allow all TSO users to invoke %TODO and %TODOKICK from the READY
+prompt without modifying TK5 logon PROCs or KICKS system libraries:
+  - Submit the idempotent hook job (also safe to re-run anytime after
+    applying a TK5 system upgrade):
+
+      SUBMIT 'TODO.JCL(INSTHOOK)'
+
+  - Verify RC=0000 on steps REALIAS and HOOKCLST (confirming members
+    TODO and TODOKICK were copied into SYS2.CMDPROC).
+
+5. STEP 4 - OPTIONAL SITE CONFIGURATION
+------------------------------------------------------------------------
+  - Nightly Print Subscriptions (Subscription Model C):
+    By default, TODOBAT2 prints Daily Action Sheets for every user in
+    TODO.CONTROL.CLUSTER whose print switch is 'Y'. To restrict nightly
+    printing to specific TSO User IDs, edit TODO.PARMLIB(PRTLIST) and
+    list one User ID per line starting in Column 1.
+  - RAKF Security (If Active):
+    If your TK5 installation enforces dataset-level RAKF profiles,
+    define a profile for 'TODO.**' granting UPDATE access to TSO users.
+
+6. STEP 5 - SMOKE TEST & VERIFICATION
+------------------------------------------------------------------------
+  1. Test TSO Line-Mode CLI from TSO READY:
+       %TODO ADD TITLE('VERIFY TK5 INSTALLATION') PRI(1) CAT(MVS)
+       %TODO LIST
+       %TODO DONE ARG1(1)
+  2. Test KICKS 3270 Online Interface from TSO READY:
+       %TODOKICK
+     Press CLEAR on the KICKS banner, type TODO, and press ENTER to
+     open the browse screen (TODOM1). Press PF3 to exit KICKS cleanly.
+  3. Test Nightly Batch Archive & Action Sheet Run:
+       SUBMIT 'TODO.JCL(TODONITE)'
+     Confirm task 00000001 archives to TODO.ARCHIVE.GDG(+1) and a
+     Daily Action Sheet prints on SYSOUT=A (virtual printer 00E).
+
+7. UNINSTALL REFERENCE
+------------------------------------------------------------------------
+To completely remove this application in the future, read member
+TODO.JCL(UNINDOC) and submit TODO.JCL(UNINSTAL).
+========================================================================

@@ -1,0 +1,49 @@
+========================================================================
+MEMBER:  TODO.JCL(UNINDOC)
+TITLE:   MVS 3.8J TO-DO MANAGER (TODO) - ON-HOST UNINSTALL GUIDE
+========================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------
+This document provides step-by-step instructions to completely remove
+the Multi-User To-Do Manager (TODO) from your MVS 3.8j (TK5) system.
+The companion teardown JCL resides in the same PDS: TODO.JCL(UNINSTAL).
+
+2. PRE-UNINSTALL PREPARATION (QUIESCE ACTIVE USERS)
+------------------------------------------------------------------------
+Before submitting the uninstall job, verify that no TSO users are
+currently running KICKS (%TODOKICK) or the TSO CLI (%TODO):
+  - Step CHKUSE in TODO.JCL(UNINSTAL) allocates TODO.MASTER.CLUSTER
+    with DISP=OLD. If any online session holds the file open, the job
+    will wait or fail safely before deleting any datasets.
+
+3. RUNNING THE UNINSTALL JOB
+------------------------------------------------------------------------
+Submit the teardown job from TSO READY or RFE Option 3.4:
+
+  SUBMIT 'TODO.JCL(UNINSTAL)'
+
+The job runs with MSGCLASS=X (held output) and executes five steps:
+  - Step 1 (CHKUSE)  : Verifies exclusive access to TODO.MASTER.CLUSTER.
+  - Step 2 (DELVSAM) : Deletes PATH1, AIX1, MASTER.CLUSTER,
+                       CONTROL.CLUSTER, all generations and base of
+                       TODO.ARCHIVE.GDG, and SYS2.CMDPROC hooks
+                       (TODO and TODOKICK).
+  - Step 3 (DELPDS)  : Deletes all ten TODO.* PDS libraries on PUB000.
+  - Step 4 (DELALIAS): Removes the 'TODO' alias from the Master Catalog.
+  - Step 5 (CHKLIST) : Writes a post-uninstall verification checklist
+                       to the held SYSOUT listing.
+
+4. POST-UNINSTALL VERIFICATION & MANUAL CHECKLIST
+------------------------------------------------------------------------
+  [ ] Inspect job UNINSTAL in RFE Option 3.8 (Outlist) and confirm
+      RC=0000 across all steps.
+  [ ] In RFE Option 3.4, search DSNAME level 'TODO' to verify zero
+      orphan datasets remain cataloged or on volume PUB000.
+  [ ] In RFE Option 3.4, verify members TODO and TODOKICK are no
+      longer present in SYS2.CMDPROC.
+  [ ] If your site added custom RAKF security rules for 'TODO.**',
+      remove those entries and refresh RAKF.
+  [ ] If TODO.JCL(TODONITE) was added to an automated batch schedule,
+      remove that schedule entry.
+========================================================================
