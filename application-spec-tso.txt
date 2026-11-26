@@ -1,0 +1,468 @@
+========================================================================
+DOCUMENT ID : SPEC-MVS38J-TSO-001 (REV 2.0 - FULL SPECIFICATION)
+TITLE       : MVS 3.8J TSO-ONLY MULTI-USER TO-DO MANAGER SPECIFICATION
+SUBSYSTEM   : TODO MANAGER (MVS 3.8J TK5 - TSO FOREGROUND & BATCH)
+ENVIRONMENT : IBM MVS 3.8J (TURNKEY 5 / TK5) + HERCULES S/370
+              TSO FOREGROUND / IKJEFT01 BATCH / OS/VS COBOL (IKFCBL00)
+              SYSTEM/370 ASSEMBLER (IFOX00) / IDCAMS VSAM / TSO CLIST
+              (ZERO KICKS / CICS TP MONITOR DEPENDENCY)
+AUTHOR      : IAN STANLEY
+DATE        : NOVEMBER 2026
+========================================================================
+
+1. EXECUTIVE SUMMARY & ARCHITECTURAL OVERVIEW
+------------------------------------------------------------------------
+This document defines the complete functional, environmental, and data
+architecture for the standalone TSO-Only edition of the Multi-User
+To-Do Manager on IBM MVS 3.8j (Turnkey 5 / TK5).
+
+While the full hybrid edition pairs a 3270 KICKS online interface with
+a TSO line-mode CLI, this TSO-Only edition is purpose-built for MVS 3.8j
+installations that either do not run a teleprocessing monitor (KICKS or
+CICS) or prefer pure TSO foreground and batch automation. It delivers
+complete multi-user task tracking, cross-user delegation, priority and
+due-date scheduling, three-line task annotations, nightly GDG archival,
+VSAM reorganization, and physical 1403 Daily Action Sheet printing—all
+accessible directly from the TSO READY prompt, RFE/RPF Option 6, or
+standard IKJEFT01 batch jobs.
+
+1.1 CORE DESIGN PILLARS
+    1. Zero TP Monitor Overhead:
+       Operates exclusively using standard MVS 3.8j facilities (TSO,
+       CLIST, QSAM, VSAM KSDS/AIX/PATH, GDG, IFOX00, and IKFCBL00). No
+       KICKS/CICS tables, BMS mapsets, or pre-translators are needed.
+    2. True Multi-User Concurrency on MVS 3.8j:
+       Multiple TSO users and background batch initiators share the
+       same VSAM datasets concurrently. System-wide MVS ENQ/DEQ via
+       Assembler subprogram TODOLOCK (QNAME='TODOFILE', SCOPE=SYSTEM)
+       serializes control-counter increments and master record updates,
+       complemented by optimistic record-version tracking.
+    3. Upgrade-Safe Storage Isolation:
+       All code libraries, parameter members, VSAM clusters, and GDG
+       archives reside on user volume PUB000 under the 'TODO' Master
+       Catalog alias. TK5 system upgrades that replace MVSRES or the
+       Master Catalog never overwrite user data or executables.
+    4. Strict COBOL-68 & JCL Standards Compliance:
+       Every COBOL module compiles cleanly under MVS 3.8j OS/VS COBOL
+       (IKFCBL00) using strict COBOL-68 syntax (Columns 1-72, period-
+       terminated control structures, COMP-3 / COMP SYNC numerics, and
+       GOBACK / EXIT PROGRAM termination).
+
+2. APPLICATION FEATURES & FUNCTIONAL CAPABILITIES
+------------------------------------------------------------------------
+2.1 MULTI-USER TASK LIFECYCLE MANAGEMENT
+    Every task belongs to a specific TSO User ID (Owner) and receives a
+    per-user monotonically increasing 8-digit sequence number
+    (00000001 through 99999999) tracked in TODO.CONTROL.CLUSTER.
+    Tasks progress through five explicit lifecycle states:
+      - 'O' (OPEN)        : Newly created task awaiting action.
+      - 'I' (IN PROGRESS) : Actively being worked by the owner.
+      - 'W' (WAITING ON)  : Blocked on an external dependency/person.
+      - 'C' (COMPLETED)   : Finished; stamps TODO-DONE-DATE and becomes
+                            eligible for nightly archive/purge.
+      - 'X' (CANCELLED)   : Abandoned/voided; stamps TODO-DONE-DATE and
+                            becomes eligible for nightly archive/purge.
+
+2.2 PRIORITY & DUE-DATE SCHEDULING (ALTERNATE INDEX BROWSING)
+    - Five-tier priority scale:
+        1 = Urgent / Critical
+        2 = High
+        3 = Normal (Default if omitted)
+        4 = Low
+        5 = Deferred / Someday
+    - Optional 8-digit Gregorian due date (YYYYMMDD), validated for
+      calendar correctness including leap years, or 00000000 (No Due
+      Date, which sorts naturally after dated tasks when displayed).
+    - VSAM Alternate Index (TODO.MASTER.AIX1) automatically maintains a
+      live secondary sort order by:
+        OWNER-ID (8) + DUE-DATE (8) + PRIORITY (1)
+      ensuring LIST commands and Daily Action Sheets always present the
+      most urgent and earliest-due items first.
+
+2.3 THREE-LINE ANNOTATIONS & AUDIT TRAIL
+    - Each task stores up to three 60-character note lines (180 bytes
+      total) that can be populated on ADD or updated individually via
+      the NOTE verb (LINE(1), LINE(2), or LINE(3)).
+    - Every task permanently records TODO-CREATED-DATE (YYYYMMDD),
+      TODO-CREATED-BY (submitting TSO User ID), TODO-DONE-DATE, and an
+      internal binary update counter (TODO-REC-VERSION).
+
+2.4 CROSS-USER TASK CREATION & DELEGATION
+    - Direct Assignment on Creation: A user can create a task directly
+      in another user's queue via %TODO ADD ... TO(target_user), while
+      TODO-CREATED-BY preserves the originator's TSO User ID.
+    - Live Delegation (ASSIGN): An owner can transfer an existing task
+      to another TSO user via %TODO ASSIGN ARG1(id) TO(target_user).
+      Under system-wide ENQ, TODOCMD auto-creates a control record for
+      the target user if needed, allocates the target user's next
+      sequence ID, writes the task under the new composite key, and
+      deletes the source key cleanly.
+
+2.5 USER PREFERENCES & NIGHTLY ACTION SHEET SUBSCRIPTIONS
+    - First-time users are automatically provisioned in
+      TODO.CONTROL.CLUSTER upon their first ADD or PRINT command.
+    - Each user configures three personal settings via %TODO PRINT:
+        1. Daily Action Sheet opt-in flag ('Y' or 'N')
+        2. 24-character Banner Display Name (printed on physical sheets)
+        3. Personal Default Priority (1-5) applied when PRI() is omitted.
+    - Subscription Model C (Hybrid Opt-In + Operator Override):
+        * By default, nightly job TODONITE scans TODO.CONTROL.CLUSTER
+          and prints Action Sheets for every user with PRINT-SW = 'Y'.
+        * If an operator places explicit TSO User IDs in
+          TODO.PARMLIB(PRTLIST), TODOBAT2 switches to override mode and
+          prints Action Sheets exclusively for those listed users.
+        * Subscribed users with zero active tasks receive a clean
+          '*** NO OPEN TASKS TODAY ***' confirmation page.
+
+2.6 NIGHTLY BATCH ARCHIVAL & VSAM REORGANIZATION
+    - Automated batch job TODONITE sweeps all 'C' (Completed) and 'X'
+      (Cancelled) tasks into a +1 generation of TODO.ARCHIVE.GDG and
+      deletes them from TODO.MASTER.CLUSTER.
+    - Reorganizes TODO.MASTER.CLUSTER via IDCAMS REPRO -> DELETE/DEFINE
+      -> REPRO -> BLDINDEX to reclaim CI/CA splits and keep AIX1
+      optimal.
+
+3. MVS 3.8J RUNTIME ENVIRONMENT & SYSTEM ARCHITECTURE
+------------------------------------------------------------------------
+3.1 HARDWARE & OPERATING SYSTEM PROFILE
+    - Processor Architecture : IBM System/370 (Hercules S/370 emulator)
+    - Operating System       : MVS 3.8j Turnkey 5 (TK5)
+    - Job Entry Subsystem    : JES2 (Internal Reader, Held Class X,
+                               1403 Print Class A on device 00E)
+    - Interactive Environment: TSO (Time Sharing Option) VTAM/TCAM 3270
+                               line-mode terminal or RFE/RPF Option 6
+    - Compilers & Utilities  :
+        * OS/VS COBOL Compiler   : IKFCBL00 (PROC COBUCL)
+        * System/370 Assembler   : IFOX00   (PROC ASMFCL)
+        * Access Method Services : IDCAMS
+        * PDS Maintenance        : IEBUPDTE, IEBCOPY, IEBGENER, IEFBR14
+        * TSO Batch Monitor      : IKJEFT01
+
+3.2 DASD & CATALOG LAYOUT (VOLUME PUB000)
+    All permanent application datasets reside on 3350 volume PUB000 and
+    are cataloged in user catalog SYS1.UCAT.TSO via Master Catalog
+    alias 'TODO':
+
+    DATASET NAME             ORG    RECFM  LRECL  BLKSIZE  ALLOCATION
+    -----------------------  -----  -----  -----  -------  -------------
+    TODO.MASTER.CLUSTER      VSAM   KSDS     332     4096  15,5 TRK
+    TODO.MASTER.AIX1         VSAM   AIX      200     4096   5,2 TRK
+    TODO.MASTER.PATH1        VSAM   PATH     332     4096  (Path entry)
+    TODO.CONTROL.CLUSTER     VSAM   KSDS      64     4096   2,1 TRK
+    TODO.ARCHIVE.GDG         GDG    FB       332     6308  LIMIT(30) SCR
+    TODO.COPYLIB             PDS    FB        80     6160   5,2,10 TRK
+    TODO.COBOL               PDS    FB        80     6160  10,5,15 TRK
+    TODO.ASM                 PDS    FB        80     6160   2,1,5  TRK
+    TODO.CLIST               PDS    FB        80     6160   2,1,5  TRK
+    TODO.PARMLIB             PDS    FB        80     6160   2,1,5  TRK
+    TODO.JCL                 PDS    FB        80     6160   5,2,10 TRK
+    TODO.LOADLIB             PDS    U          0     6144  10,5,15 TRK
+
+3.3 SYSTEM TOUCHPOINTS & UPGRADE SAFETY
+    Only two touchpoints exist outside volume PUB000:
+      1. Master Catalog Alias: DEFINE ALIAS (NAME(TODO) RELATE(SYS1.UCAT.TSO))
+      2. Global CLIST Hook   : SYS2.CMDPROC(TODO) copied from TODO.CLIST(TODO)
+    Both touchpoints are encapsulated in idempotent job TODO.JCL(INSTHOOK),
+    which can be re-submitted anytime after a TK5 system upgrade to
+    restore %TODO across all TSO users in seconds.
+
+3.4 CONCURRENCY & LOCKING PROTOCOL (TODOLOCK)
+    - VSAM SHAREOPTIONS(3 3) allows concurrent read/write access across
+      multiple TSO address spaces and batch jobs without VSAM open
+      conflicts.
+    - Application-level mutual exclusion is enforced by Assembler
+      subprogram TODOLOCK using MVS SVC 56 (ENQ) and SVC 48 (DEQ):
+        * QNAME : 'TODOFILE' (8 bytes, major resource name)
+        * RNAME : 'CONTROL ' (8 bytes) when reading/incrementing
+                  TODO.CONTROL.CLUSTER counters or creating user rows
+        * RNAME : <OWNER-ID> (8 bytes, padded with blanks) when
+                  writing, rewriting, or deleting in TODO.MASTER.CLUSTER
+        * RNAME : 'MASTER  ' (8 bytes) during nightly TODOBAT1 sweep
+        * SCOPE : SYSTEM (cross-address-space serialization)
+        * RET   : USE (non-blocking test with 5 retries x 0.20s STIMER
+                  wait; returns RC=08 if resource remains busy).
+
+4. COMPLETE DATA FORMATS & RECORD SCHEMAS
+------------------------------------------------------------------------
+4.1 MASTER TASK VSAM KSDS RECORD (TODO.COPYLIB(TODOREC) - 332 BYTES)
+    - Cluster Type   : VSAM KSDS, Fixed-Length 332 bytes
+    - Primary Key    : Bytes 1-16 (TODO-OWNER-ID + TODO-TASK-ID)
+    - Alternate Key  : Bytes 17-33 (TODO-ALT-OWNER-ID +
+                       TODO-ALT-DUE-DATE + TODO-ALT-PRIORITY),
+                       NONUNIQUEKEY, UPGRADE
+    - Sentinel Record: Key '0000000000000000' loaded at cluster creation
+                       to keep VSAM KSDS non-empty across cold starts.
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-008   8  CHAR         PIC X(08)              TODO-OWNER-ID
+    009-016   8  ZONED DEC    PIC 9(08)              TODO-TASK-ID
+    017-024   8  CHAR         PIC X(08)              TODO-ALT-OWNER-ID
+    025-032   8  ZONED DEC    PIC 9(08)              TODO-ALT-DUE-DATE
+    033-033   1  ZONED DEC    PIC 9(01)              TODO-ALT-PRIORITY
+    034-093  60  CHAR         PIC X(60)              TODO-TITLE
+    094-103  10  CHAR         PIC X(10)              TODO-CATEGORY
+    104-104   1  CHAR         PIC X(01)              TODO-STATUS
+    105-105   1  ZONED DEC    PIC 9(01)              TODO-PRIORITY
+    106-113   8  ZONED DEC    PIC 9(08)              TODO-DUE-DATE
+    114-121   8  ZONED DEC    PIC 9(08)              TODO-CREATED-DATE
+    122-129   8  CHAR         PIC X(08)              TODO-CREATED-BY
+    130-137   8  ZONED DEC    PIC 9(08)              TODO-DONE-DATE
+    138-197  60  CHAR         PIC X(60)              TODO-NOTE-LINE-1
+    198-257  60  CHAR         PIC X(60)              TODO-NOTE-LINE-2
+    258-317  60  CHAR         PIC X(60)              TODO-NOTE-LINE-3
+    318-319   2  BINARY       PIC S9(04) COMP SYNC   TODO-REC-VERSION
+    320-332  13  CHAR         PIC X(13)              TODO-FILLER
+
+4.2 USER CONTROL VSAM KSDS RECORD (TODO.COPYLIB(TODOCTRL) - 64 BYTES)
+    - Cluster Type   : VSAM KSDS, Fixed-Length 64 bytes
+    - Primary Key    : Bytes 1-8 (CTRL-USER-ID)
+    - Sentinel Record: Key '00000000' loaded at cluster creation.
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-008   8  CHAR         PIC X(08)              CTRL-USER-ID
+    009-016   8  ZONED DEC    PIC 9(08)              CTRL-LAST-TASK-ID
+    017-017   1  CHAR         PIC X(01)              CTRL-DAILY-PRINT-SW
+    018-018   1  ZONED DEC    PIC 9(01)              CTRL-DEFAULT-PRI
+    019-042  24  CHAR         PIC X(24)              CTRL-USER-NAME
+    043-044   2  BINARY       PIC S9(04) COMP SYNC   CTRL-ACTIVE-COUNT
+    045-052   8  ZONED DEC    PIC 9(08)              CTRL-LAST-LOGIN-DATE
+    053-064  12  CHAR         PIC X(12)              CTRL-FILLER
+
+4.3 TSO CLI COMMAND HANDOFF RECORD (TODO.COPYLIB(TODOCREC) - 200 BYTES)
+    - Dataset Type   : QSAM Sequential, RECFM=FB, LRECL=200
+    - Allocation     : Dynamically allocated by TODO.clist as temporary
+                       dataset '&SYSUID..TODO.CMD' (DDNAME CMDSYSIN),
+                       populated via PUTFILE, passed to CALL TODOCMD,
+                       and freed/deleted upon command completion.
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-008   8  CHAR         PIC X(08)              CMD-USER-ID
+    009-016   8  CHAR         PIC X(08)              CMD-VERB
+    017-032  16  CHAR         PIC X(16)              CMD-ARG1
+    033-048  16  CHAR         PIC X(16)              CMD-ARG2
+    049-056   8  CHAR         PIC X(08)              CMD-DUE-DATE
+    057-057   1  CHAR         PIC X(01)              CMD-PRIORITY
+    058-058   1  CHAR         PIC X(01)              CMD-LINE-NUM
+    059-068  10  CHAR         PIC X(10)              CMD-CATEGORY
+    069-076   8  CHAR         PIC X(08)              CMD-TARGET-USER
+    077-136  60  CHAR         PIC X(60)              CMD-TEXT
+    137-196  60  CHAR         PIC X(60)              CMD-NOTE
+    197-200   4  CHAR         PIC X(04)              CMD-FILLER
+
+4.4 VALIDATOR SUBPROGRAM LINKAGE (TODO.COPYLIB(TODOVLNK) - 120 BYTES)
+    Passed via CALL 'TODOVAL' USING WS-VAL-PARM:
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-004   4  CHAR         PIC X(04)              VLNK-FUNC-CODE
+                                                       ('ALL ','DATE',
+                                                        'PRIO','STAT',
+                                                        'OWNR')
+    005-005   1  CHAR         PIC X(01)              VLNK-STATUS
+    006-006   1  ZONED DEC    PIC 9(01)              VLNK-PRIORITY
+    007-014   8  ZONED DEC    PIC 9(08)              VLNK-DATE-FIELD
+    015-015   1  CHAR         PIC X(01)              VLNK-ZERO-DATE-OK
+    016-023   8  CHAR         PIC X(08)              VLNK-OWNER-ID
+    024-083  60  CHAR         PIC X(60)              VLNK-TITLE
+    084-085   2  BINARY       PIC S9(04) COMP SYNC   VLNK-RC (00 or 08)
+    086-120  35  CHAR         PIC X(35)              VLNK-ERR-MSG
+
+4.5 LOCK SUBPROGRAM LINKAGE (TODO.COPYLIB(TODOLLNK) - 20 BYTES)
+    Passed via CALL 'TODOLOCK' USING WS-LOCK-PARM:
+
+    OFFSET  LEN  FORMAT       COBOL PICTURE          FIELD NAME
+    ------  ---  -----------  ---------------------  -------------------
+    001-004   4  CHAR         PIC X(04)              LLNK-ACTION
+                                                       ('ENQ ' / 'DEQ ')
+    005-012   8  CHAR         PIC X(08)              LLNK-RNAME
+    013-014   2  BINARY       PIC S9(04) COMP SYNC   LLNK-RC
+                                                       (00=OK, 04=HELD,
+                                                        08=BUSY, 16=ERR)
+    015-020   6  CHAR         PIC X(06)              LLNK-FILLER
+
+4.6 ARCHIVE GDG & PRINT REPORT FORMATS
+    - Nightly Archive Dataset (TODO.ARCHIVE.GDG(+1)):
+        * Organization : QSAM Sequential Generation Data Group (LIMIT 30)
+        * DCB          : RECFM=FB, LRECL=332, BLKSIZE=6308
+        * Record Layout: Exact 332-byte TODOREC image of purged 'C'/'X'
+                         tasks.
+    - Daily Action Sheet Spool Output (RPTOUT -> SYSOUT=A):
+        * Organization : QSAM SYSOUT Print Dataset
+        * DCB          : RECFM=FBA, LRECL=133, BLKSIZE=3990
+        * Carriage Ctrl: Column 1 ASA control ('1' = Top-of-Form page
+                         eject per user banner, '0' = double space,
+                         '-' = triple space, ' ' = single space).
+    - Subscription Override Control File (TODO.PARMLIB(PRTLIST)):
+        * Organization : PDS Member, RECFM=FB, LRECL=80
+        * Format       : Columns 1-8 contain TSO User IDs; '*' in Col 1
+                         or blank lines are treated as comments.
+
+5. TSO COMMAND-LINE INTERFACE (CLI) SPECIFICATION
+------------------------------------------------------------------------
+5.1 INVOCATION & CLIST WRAPPER (TODO.CLIST(TODO))
+    Users invoke the application from any TSO READY prompt (or RFE/RPF
+    Option 6) using the %TODO CLIST:
+
+      PROC 1 VERB ARG1() ARG2() TITLE() DUE(00000000) PRI(0) +
+           CAT(GENERAL) TO() NOTE() LINE(1) USER() NAME()
+
+    Execution Flow inside TODO.clist:
+      1. Captures &SYSUID into CMD-USER-ID and uppercases VERB/keywords.
+      2. Allocates temporary dataset '&SYSUID..TODO.CMD' (RECFM=FB,
+         LRECL=200) and writes the formatted 200-byte TODOCREC record.
+      3. Allocates shared VSAM DDNAMEs:
+           - TODOMAST -> TODO.MASTER.CLUSTER (DISP=SHR)
+           - TODOPATH -> TODO.MASTER.PATH1   (DISP=SHR)
+           - TODOCTRL -> TODO.CONTROL.CLUSTER (DISP=SHR)
+           - CMDSYSIN -> '&SYSUID..TODO.CMD' (DISP=OLD)
+      4. Executes: CALL 'TODO.LOADLIB(TODOCMD)'
+      5. Captures &LASTCC, frees all DDNAMEs, deletes '&SYSUID..TODO.CMD',
+         and exits with CODE(&LASTCC).
+
+5.2 COMPLETE COMMAND REFERENCE & EXAMPLES
+    1. LIST (Default verb if omitted)
+       Syntax  : %TODO [LIST] [ALL | WAIT] [USER(userid)]
+       Function: Browses TODOPATH in Due-Date + Priority order.
+                 - Default: Displays active tasks (O, I, W) for &SYSUID.
+                 - ALL    : Displays all tasks including C and X.
+                 - WAIT   : Displays only Waiting ('W') tasks.
+                 - USER() : Views another TSO user's task queue.
+       Output  : 78-column terminal table (ID, ST, PRI, DUE, CATEGORY,
+                 TITLE) plus summary footer count.
+
+    2. ADD
+       Syntax  : %TODO ADD TITLE('text') [DUE(YYYYMMDD)] [PRI(1-5)]
+                       [CAT(category)] [TO(userid)] [NOTE('note1')]
+       Function: Validates inputs via TODOVAL, ensures target user has a
+                 TODOCTRL record, increments CTRL-LAST-TASK-ID under
+                 ENQ, writes new record to TODOMAST, and echoes the new
+                 8-digit Task ID.
+
+    3. VIEW
+       Syntax  : %TODO VIEW ARG1(id)
+       Function: Displays all fields of a single task (ID, Owner,
+                 Status, Priority, Due Date, Category, Created Date,
+                 Created By, Done Date, Title, and Notes 1-3). Accepts
+                 unpadded IDs (e.g., ARG1(4) or ARG1(00000004)).
+
+    4. START / WAIT / DONE / CANCEL
+       Syntax  : %TODO START  ARG1(id)    -> Sets Status = 'I'
+                 %TODO WAIT   ARG1(id)    -> Sets Status = 'W'
+                 %TODO DONE   ARG1(id)    -> Sets Status = 'C' + DoneDt
+                 %TODO CANCEL ARG1(id)    -> Sets Status = 'X' + DoneDt
+       Function: Acquires owner ENQ, reads task from TODOMAST, updates
+                 status and TODO-DONE-DATE, increments TODO-REC-VERSION,
+                 rewrites record, and releases ENQ.
+
+    5. ASSIGN
+       Syntax  : %TODO ASSIGN ARG1(id) TO(target_userid)
+       Function: Validates target_userid, ensures target TODOCTRL exists,
+                 allocates target user's next Task ID under ENQ, writes
+                 re-keyed task record under target user, and deletes
+                 the original record from source user's queue.
+
+    6. NOTE
+       Syntax  : %TODO NOTE ARG1(id) NOTE('text') [LINE(1|2|3)]
+       Function: Updates Note Line 1 (default), 2, or 3 on an existing
+                 task under owner ENQ.
+
+    7. PRINT
+       Syntax  : %TODO PRINT ARG1(ON|OFF) [NAME('display name')]
+                         [PRI(1-5)]
+       Function: Updates user preferences in TODO.CONTROL.CLUSTER:
+                 - ARG1(ON|OFF) : Enables/disables nightly Action Sheet
+                 - NAME('...')  : Sets 24-char banner display name
+                 - PRI(1-5)     : Sets user's default task priority.
+
+5.3 CLI RETURN CODES (TODOCMD)
+    00 - Command executed cleanly.
+    04 - Warning (e.g., LIST returned zero matching tasks).
+    08 - User input or validation error (invalid date, unknown verb,
+         non-numeric or non-existent Task ID).
+    16 - Severe system error (VSAM file status error or ENQ failure).
+
+6. PROGRAM MODULES & BATCH SUITE ARCHITECTURE
+------------------------------------------------------------------------
+6.1 MODULE INVENTORY
+    1. TODOLOCK (TODO.ASM(TODOLOCK) -> TODO.LOADLIB(TODOLOCK))
+       System/370 Assembler subprogram providing cross-address-space
+       ENQ/DEQ serialization via SVC 56 / SVC 48 with STIMER retry loop.
+    2. TODOVAL (TODO.COBOL(TODOVAL) -> TODO.LOADLIB(TODOVAL))
+       COBOL-68 subprogram validating status codes, priorities (1-5),
+       Gregorian dates (YYYYMMDD leap-year check), owner IDs, and titles.
+    3. TODOCMD (TODO.COBOL(TODOCMD) -> TODO.LOADLIB(TODOCMD))
+       COBOL-68 foreground/batch CLI processor executing all 10 verbs.
+    4. TODOBAT1 (TODO.COBOL(TODOBAT1) -> TODO.LOADLIB(TODOBAT1))
+       COBOL-68 nightly archive and purge processor. Acquires system-wide
+       ENQ ('MASTER  '), writes 'C' and 'X' tasks (skipping sentinel
+       '00000000') to TODO.ARCHIVE.GDG(+1), deletes them from
+       TODO.MASTER.CLUSTER, and prints audit counts (RC=00 if records
+       archived, RC=04 if zero records eligible, RC=16 on I/O error).
+    5. TODOBAT2 (TODO.COBOL(TODOBAT2) -> TODO.LOADLIB(TODOBAT2))
+       COBOL-68 Daily Action Sheet generator. Evaluates PRTLIST override
+       cards vs. TODO.CONTROL.CLUSTER print flags (Subscription Model C)
+       and formats 133-column ASA Action Sheets sorted by due date and
+       priority via TODO.MASTER.PATH1.
+
+6.2 NIGHTLY BATCH JOB STREAM (TODO.JCL(TODONITE))
+    Executes five restartable steps controlled by COND=(4,LT):
+      - Step 1 (CLEANUP)  : IEFBR14 deletes leftover TODO.REORG.TEMP
+                            via DISP=(MOD,DELETE,DELETE).
+      - Step 2 (ARCHIVE)  : EXEC PGM=TODOBAT1 archives 'C'/'X' records
+                            to TODO.ARCHIVE.GDG(+1) and purges them.
+      - Step 3 (REORG)    : IDCAMS exports active tasks to
+                            TODO.REORG.TEMP, deletes and re-defines
+                            TODO.MASTER.CLUSTER + AIX1 + PATH1 on
+                            PUB000, reloads via REPRO, and rebuilds AIX1
+                            via BLDINDEX.
+      - Step 4 (DELTEMP)  : IEFBR14 removes TODO.REORG.TEMP.
+      - Step 5 (PRTSHEET) : EXEC PGM=TODOBAT2 prints Daily Action Sheets
+                            to SYSOUT=A (virtual 1403 printer 00E).
+
+6.3 IKJEFT01 BATCH CLI EXECUTION
+    Any CLI command can also be executed in background batch via
+    IKJEFT01 (e.g., for automated task injection from other batch jobs):
+
+      //ADDTASK  EXEC PGM=IKJEFT01
+      //SYSPROC  DD   DSN=TODO.CLIST,DISP=SHR
+      //SYSTSPRT DD   SYSOUT=*
+      //SYSTSIN  DD   *
+        %TODO ADD TITLE('REVIEW NIGHTLY SMF REPORTS') PRI(2) CAT(OPS)
+      /*
+
+7. INSTALLATION, BUILD & TEARDOWN LIFECYCLE
+------------------------------------------------------------------------
+  - TODO.JCL(INSTCORE) : Allocates Master Catalog alias 'TODO', all
+                         PDS libraries, VSAM KSDS/AIX/PATH clusters,
+                         and TODO.ARCHIVE.GDG on PUB000; seeds VSAM
+                         zero-key sentinel records.
+  - TODO.JCL(COMPALL)  : Assembles TODOLOCK and compiles/links TODOVAL,
+                         TODOCMD, TODOBAT1, and TODOBAT2 into
+                         TODO.LOADLIB.
+  - TODO.JCL(INSTHOOK) : Idempotent post-install / post-TK5-upgrade job
+                         defining the 'TODO' alias and copying TODO
+                         CLIST into SYS2.CMDPROC.
+  - TODO.JCL(UNINSTAL) : Complete teardown job (MSGCLASS=X held output)
+                         that verifies exclusive access (DISP=OLD),
+                         deletes VSAM clusters/AIX/PATH, GDG, SYS2.CMDPROC
+                         hook, all TODO.* PDSs, and the 'TODO' alias,
+                         and prints a post-uninstall audit checklist.
+
+8. DEVELOPMENT & CODING STANDARDS (STD-MVS38J-COBOL-001 REV 3.2)
+------------------------------------------------------------------------
+  - Compiler           : OS/VS COBOL (IKFCBL00), COBOL-68 standard
+  - Source Columns     : Strictly Columns 1-72 (Cols 73-80 blank)
+  - Scope Terminators  : Period-terminated IF/ELSE/PERFORM only (no
+                         COBOL-85 END-IF, END-READ, END-WRITE, END-PERFORM)
+  - Numeric Storage    : COMP-3 (packed decimal) for counters and
+                         accumulators; COMP SYNC for binary subscripts
+                         and version numbers
+  - Program Termination: GOBACK in main programs (TODOCMD, TODOBAT1,
+                         TODOBAT2); EXIT PROGRAM + GOBACK in called
+                         subprogram TODOVAL
+  - JCL Standards      : MSGCLASS=X, MSGLEVEL=(1,1), REGION=4096K,
+                         /*JOBPARM LINES=50, COND=(4,LT) on all steps
+========================================================================
