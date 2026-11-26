@@ -1,0 +1,182 @@
+================================================================================
+APPLICATION SPECIFICATION: MVS 3.8J MULTI-USER TO-DO MANAGER (TODO)
+DOCUMENT ID:   application-spec0.txt
+TARGET SYSTEM: IBM MVS 3.8j (Hercules / TK5 Distribution)
+LANGUAGES:     OS/VS COBOL (IKFCBL00), S/370 Assembler (IFOX00), BMS, CLIST, JCL
+================================================================================
+
+1. EXECUTIVE SUMMARY & ARCHITECTURAL OVERVIEW
+--------------------------------------------------------------------------------
+The To-Do Manager (TODO) is a multi-user task tracking application designed for
+MVS 3.8j (TK5) running under Hercules. It implements a hybrid interface model
+providing full-screen 3270 interactive access via KICKS, line-mode command-line
+access via TSO CLIST, and automated overnight batch processing for archiving,
+VSAM reorganization, and printed Daily Action Sheet distribution.
+
+Core Design Principles:
+- Upgrade-Safe Isolation: All user code, libraries, and VSAM datasets reside on
+  user-preserved DASD (PUB000) under the TODO high-level qualifier (HLQ).
+  System touchpoints (Master Catalog alias, SYS2.CMDPROC CLIST hooks) are
+  isolated in an idempotent post-upgrade JCL job (INSTHOOK).
+- Shared Business Logic: Record layouts (COPYLIB), validation rules (TODOVAL),
+  and concurrency serialization (TODOLOCK) are shared across KICKS, TSO, and
+  batch programs.
+- Multi-User Concurrency: Because TK5 runs KICKS inside individual TSO address
+  spaces rather than a single shared region, VSAM clusters use SHAREOPTIONS(3 3)
+  protected by system-wide MVS ENQ/DEQ serialization (TODOLOCK) and optimistic
+  record version counters.
+
+
+2. USER INTERFACES & ACCESS MODES
+--------------------------------------------------------------------------------
+2.1 KICKS Online 3270 Interface (Transaction ID: TODO)
+- Launched via custom CLIST (%TODOKICK) concatenating TODO.KICKS.LOADLIB and
+  custom KICKS table suffixes (PPT=2$, PCT=2$, FCT=2$) without altering TK5
+  system KICKS libraries.
+- Pseudo-conversational COBOL programs driving 3270 BMS maps (TODOM00):
+  * TODOM1 (Browse/List): View tasks filtered by Open/All/Waiting; page with
+    PF7/PF8; inline row actions (S=Select/Edit, C=Complete, W=Waiting, X=Cancel);
+    PF4=Add Task; PF9=User Settings; PF3=Exit.
+  * TODOM2 (Detail/Add/Edit/Delegate): Create or modify tasks, assign/delegate
+    to any valid TSO User ID, set status, priority, due date, category, and
+    3x60-byte notes.
+  * TODOM3 (User Settings): Toggle nightly Daily Action Sheet print flag (Y/N),
+    set default priority (1-5), and update display name.
+
+2.2 TSO Line-Mode CLI (%TODO CLIST -> TODOCMD)
+- Invoked directly from TSO READY prompt without starting KICKS; opens VSAM
+  clusters with DISP=SHR, executes requested action under ENQ/DEQ, outputs
+  80-column formatted text to terminal, and frees allocations immediately.
+- Supported Verbs (task IDs accept unpadded integers such as 12 -> 00000012):
+  * TODO [LIST] [ALL|OPEN|WAIT] [USER(userid)]
+  * TODO ADD 'title' [DUE(yyyymmdd)] [PRI(1-5)] [CAT(cat)] [TO(uid)] [NOTE('...')]
+  * TODO VIEW taskid
+  * TODO START taskid   (sets status to 'I')
+  * TODO WAIT taskid    (sets status to 'W')
+  * TODO DONE taskid    (sets status to 'C' and stamps DONE-DATE)
+  * TODO CANCEL taskid  (sets status to 'X' and stamps DONE-DATE)
+  * TODO ASSIGN taskid TO(userid)
+  * TODO NOTE taskid 'text' [LINE(1|2|3)]
+  * TODO PRINT [ON|OFF] [NAME('display name')] [PRI(1-5)]
+- Note: Hard deletion is omitted from CLI; CANCEL ('X') marks tasks for the
+  nightly audit archive run.
+
+2.3 Nightly Batch Processing (TODO.JCL(TODONITE))
+- Step 1 (Archive & Purge - TODOBAT1): Extracts all Completed ('C') and
+  Cancelled ('X') tasks from TODO.MASTER.CLUSTER to a new +1 generation of
+  TODO.ARCHIVE.GDG, then deletes extracted records from the master cluster.
+- Step 2 (Reorganize - IDCAMS): Exports active records from TODO.MASTER.CLUSTER
+  to a temporary sequential file, DELETEs and re-DEFINEs the master cluster and
+  Alternate Index, reloads via REPRO, and rebuilds the index via BLDINDEX.
+- Step 3 (Daily Action Sheet - TODOBAT2): Produces printed Action Sheets on
+  SYSOUT=A (RECFM=FBA, LRECL=133) using Subscription Model C:
+  * Default Mode: Scans TODO.CONTROL.CLUSTER and prints an Action Sheet for
+    every user where CTRL-DAILY-PRINT-SW = 'Y'.
+  * Override Mode: If SYSIN (e.g., TODO.PARMLIB(PRTLIST) or instream DD *)
+    contains explicit TSO User IDs, prints exclusively for those users.
+  * Output Format: All reports are written to a single JES2 spool dataset,
+    separated by ASA '1' page-eject carriage controls with a prominent user
+    banner header (USERID + Display Name) on each page for physical bursting.
+  * Empty Queue Handling: If a subscribed user has zero active ('O','I','W')
+    tasks, prints a 1-page banner sheet stating "NO OPEN TASKS TODAY".
+
+
+3. MULTI-USER CONCURRENCY & SECURITY DESIGN
+--------------------------------------------------------------------------------
+- Dataset Allocation: All TSO, KICKS, and batch reporting jobs allocate VSAM
+  clusters with DISP=SHR.
+- System-Wide Serialization (TODOLOCK): S/370 Assembler subprogram callable by
+  both OS/VS COBOL and KICKS COBOL. Issues MVS ENQ with SCOPE=SYSTEM on
+  QNAME='TODOFILE' (RNAME='CONTROL ' for sequence number allocation;
+  RNAME=TODO-OWNER-ID for task record updates) before READ-for-update, and
+  DEQ immediately after WRITE/REWRITE/DELETE.
+- Optimistic Locking: Master records carry a binary counter (TODO-REC-VERSION,
+  PIC S9(4) COMP) verified before REWRITE to detect concurrent screen edits.
+- Delegation Validation: Target TODO-OWNER-ID values are validated against
+  TODO.CONTROL.CLUSTER (or valid TSO user registry) before reassignment.
+
+
+4. DATASET & REPOSITORY ARCHITECTURE
+--------------------------------------------------------------------------------
+4.1 MVS Datasets on User Volume PUB000
+  Dataset Name             Org   Recfm  Lrecl  Blksize  Purpose
+  -----------------------  ----  -----  -----  -------  ------------------------
+  TODO.COPYLIB             PDS   FB     80     3120     Shared COBOL copybooks
+  TODO.COBOL               PDS   FB     80     3120     Batch/CLI/Val COBOL src
+  TODO.ASM                 PDS   FB     80     3120     Assembler source
+  TODO.KICKS.COBOL         PDS   FB     80     3120     KICKS COBOL source
+  TODO.KICKS.BMS           PDS   FB     80     3120     KICKS BMS mapsets
+  TODO.CLIST               PDS   FB     80     3120     TSO & KICKS CLISTs
+  TODO.PARMLIB             PDS   FB     80     3120     Print override lists
+  TODO.JCL                 PDS   FB     80     3120     Install/compile/batch JCL
+  TODO.LOADLIB             PDS   U      0      19069    Batch/TSO load modules
+  TODO.KICKS.LOADLIB       PDS   U      0      19069    KICKS modules/maps/tbls
+  TODO.MASTER.CLUSTER      VSAM  KSDS   332    (4096)   Primary active task store
+  TODO.MASTER.AIX1         VSAM  AIX    -      (2048)   Alt index (Owner+Due+Pri)
+  TODO.MASTER.PATH1        VSAM  PATH   -      -        Update path over AIX1
+  TODO.CONTROL.CLUSTER     VSAM  KSDS   64     (2048)   User counters & prefs
+  TODO.ARCHIVE.GDG         GDG   FB     332    3320     Nightly archived tasks
+
+4.2 GitHub Repository Structure
+  mvs-todo/
+  ├── application-spec0.txt   (This specification)
+  ├── README.md               (Installation & usage documentation)
+  ├── copybook/               (TODOREC.cpy, TODOCTRL.cpy)
+  ├── cobol/                  (TODOCMD.cbl, TODOVAL.cbl, TODOBAT1.cbl, TODOBAT2.cbl)
+  ├── asm/                    (TODOLOCK.asm)
+  ├── kicks-cobol/            (TODOK01.cbl, TODOK02.cbl, KIKTABLE.asm)
+  ├── kicks-bms/              (TODOM00.bms)
+  ├── clist/                  (TODO.clist, TODOKICK.clist)
+  ├── parmlib/                (PRTLIST.txt)
+  └── jcl/                    (INSTCORE.jcl, INSTHOOK.jcl, COMPALL.jcl, TODONITE.jcl)
+
+
+5. RECORD LAYOUTS (COBOL-68 / IKFCBL00 COPYBOOKS)
+--------------------------------------------------------------------------------
+5.1 Master Task Record: TODO.COPYLIB(TODOREC) - 332 Bytes Fixed
+  Offset  Len  Field Name             PIC Clause      Description
+  ------  ---  ---------------------  --------------  --------------------------
+  000-007   8  TODO-OWNER-ID          PIC X(8)        Primary Key Part 1: Owner
+  008-015   8  TODO-TASK-ID           PIC 9(8)        Primary Key Part 2: Seq ID
+  016-023   8  TODO-ALT-OWNER-ID      PIC X(8)        AIX1 Key Part 1: Owner
+  024-031   8  TODO-ALT-DUE-DATE      PIC 9(8)        AIX1 Key Part 2: YYYYMMDD
+  032-032   1  TODO-ALT-PRIORITY      PIC 9(1)        AIX1 Key Part 3: 1-5
+  033-092  60  TODO-TITLE             PIC X(60)       Task summary line
+  093-102  10  TODO-CATEGORY          PIC X(10)       Project/context tag
+  103-103   1  TODO-STATUS            PIC X(1)        O=Open, I=InProg, W=Wait,
+                                                      C=Completed, X=Cancelled
+  104-104   1  TODO-PRIORITY          PIC 9(1)        1 (High) to 5 (Low)
+  105-112   8  TODO-DUE-DATE          PIC 9(8)        YYYYMMDD (00000000=None)
+  113-120   8  TODO-CREATED-DATE      PIC 9(8)        YYYYMMDD creation date
+  121-128   8  TODO-CREATED-BY        PIC X(8)        Creator TSO User ID
+  129-136   8  TODO-DONE-DATE         PIC 9(8)        YYYYMMDD closed/cancelled
+  137-196  60  TODO-NOTE-LINE-1       PIC X(60)       Extended notes line 1
+  197-256  60  TODO-NOTE-LINE-2       PIC X(60)       Extended notes line 2
+  257-316  60  TODO-NOTE-LINE-3       PIC X(60)       Extended notes line 3
+  317-318   2  TODO-REC-VERSION       PIC S9(4) COMP  Optimistic lock counter
+  319-331  13  TODO-FILLER            PIC X(13)       Reserved (spaces)
+
+5.2 User Control Record: TODO.COPYLIB(TODOCTRL) - 64 Bytes Fixed
+  Offset  Len  Field Name             PIC Clause      Description
+  ------  ---  ---------------------  --------------  --------------------------
+  000-007   8  CTRL-USER-ID           PIC X(8)        Primary Key: TSO User ID
+  008-015   8  CTRL-LAST-TASK-ID      PIC 9(8)        Last allocated Task ID
+  016-016   1  CTRL-DAILY-PRINT-SW    PIC X(1)        Y=Print Action Sheet, N=No
+  017-017   1  CTRL-DEFAULT-PRI       PIC 9(1)        Default priority (1-5)
+  018-041  24  CTRL-USER-NAME         PIC X(24)       Banner display name
+  042-043   2  CTRL-ACTIVE-COUNT      PIC S9(4) COMP  Active task counter
+  044-051   8  CTRL-LAST-LOGIN-DATE   PIC 9(8)        YYYYMMDD last access
+  052-063  12  CTRL-FILLER            PIC X(12)       Reserved (spaces)
+
+
+6. RETURN CODE CONVENTIONS & DEVELOPMENT STANDARDS
+--------------------------------------------------------------------------------
+- Source Format: Columns 1-72 only (columns 73-80 blank for Git/card-reader
+  compatibility); uppercase source throughout.
+- Compiler Settings: IKFCBL00 invoked with PARM='LIB,APOST,DMAP,CLIST'.
+- Standard Batch Return Codes:
+  * RC = 00: Normal completion.
+  * RC = 04: Warning (e.g., 0 tasks archived or empty print queue).
+  * RC = 08: Recoverable data/parameter error (processing continues).
+  * RC = 12: Severe I/O or VSAM status error (downstream steps bypassed).
+================================================================================
